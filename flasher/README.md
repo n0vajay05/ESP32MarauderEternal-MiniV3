@@ -8,7 +8,7 @@ and 8 MB flash. Packaged applications include the verified Marauder Eternal
 
 1. Connect the Mini V3 with a USB data cable.
 2. Start `MarauderEternalFlasher` on Linux or
-   `MarauderEternalFlasher.exe` on Windows.
+   `MarauderEternalFlasher.exe` on Windows AFTER building it via powershell script, with python installed in your windows environment.
 3. Select the detected serial device if more than one is connected.
 4. Leave the included firmware selected, or click **Choose BIN** to select a
    different ESP32-C5 full-device or application image.
