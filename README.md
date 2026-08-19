@@ -1,5 +1,7 @@
 # ESP32 Marauder Eternal 1.14.3
 
+<img width="314" height="314" alt="esp32_marauder_eternal_source" src="https://github.com/user-attachments/assets/79332db4-7a71-423f-a99d-937090bb196f" />
+
 This workspace is the standalone Marauder Eternal firmware for one hardware
 target only:
 
@@ -11,13 +13,13 @@ target only:
 It contains the source and pinned local Arduino libraries needed to reproduce
 the firmware, plus ready-to-flash release images. It intentionally excludes
 other Marauder board profiles, historical binaries, backups, installers,
-photos, test projects, and unrelated tooling.
+photos, test projects, and unrelated tooling. This was built from the original 
+Marauder code base by JustCallMeKoKo and modified for the Marauder Mini V3 only.
 
 ## Release identity
 
 - Product: `ESP32 Marauder Eternal`
 - Version: `v1.14.3`
-- Authors shown on the splash screen: `JustCallMeKoKo/N0vajay05`
 - Arduino ESP32 core used for the verified build: `3.3.4`
 - Board target: `esp32:esp32:esp32c5`
 - Options: `FlashSize=8M,PartitionScheme=custom,PSRAM=enabled`
