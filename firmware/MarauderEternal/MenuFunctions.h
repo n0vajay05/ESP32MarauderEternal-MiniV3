@@ -318,6 +318,9 @@ class MenuFunctions
     void changeMenu(Menu* menu, bool simple_change = false);
     void drawStatusBar();
     void displayCurrentMenu(int start_index = 0);
+    #ifdef MARAUDER_MINI_V3
+      bool renderCurrentMenu(TFT_eSPI& target);
+    #endif
     #ifndef HAS_MINI_SCREEN
       void brightnessMode();
     #endif

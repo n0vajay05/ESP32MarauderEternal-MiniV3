@@ -36,106 +36,127 @@ constexpr uint16_t MINI_UI_TEXT = TFT_WHITE;
 constexpr uint16_t MINI_UI_MUTED = 0xA514;
 constexpr uint16_t MINI_UI_DANGER = TFT_RED;
 
+TFT_eSPI* mini_ui_render_target = nullptr;
+
+TFT_eSPI& miniUiTft() {
+  return mini_ui_render_target ? *mini_ui_render_target : display_obj.tft;
+}
+
+class MiniUiRenderTargetGuard {
+ public:
+  explicit MiniUiRenderTargetGuard(TFT_eSPI& target)
+      : previous_(mini_ui_render_target) {
+    mini_ui_render_target = &target;
+  }
+
+  ~MiniUiRenderTargetGuard() {
+    mini_ui_render_target = previous_;
+  }
+
+ private:
+  TFT_eSPI* previous_;
+};
+
 void drawMiniBackGlyph(int16_t x, int16_t y, uint16_t color) {
-  display_obj.tft.drawLine(x + 4, y, x, y + 4, color);
-  display_obj.tft.drawLine(x, y + 4, x + 4, y + 8, color);
-  display_obj.tft.drawFastHLine(x, y + 4, 7, color);
+  miniUiTft().drawLine(x + 4, y, x, y + 4, color);
+  miniUiTft().drawLine(x, y + 4, x + 4, y + 8, color);
+  miniUiTft().drawFastHLine(x, y + 4, 7, color);
 }
 
 void drawMiniChevron(int16_t x, int16_t y, uint16_t color) {
-  display_obj.tft.drawLine(x, y, x + 3, y + 3, color);
-  display_obj.tft.drawLine(x + 3, y + 3, x, y + 6, color);
+  miniUiTft().drawLine(x, y, x + 3, y + 3, color);
+  miniUiTft().drawLine(x + 3, y + 3, x, y + 6, color);
 }
 
 void drawMiniSymbol(uint8_t icon, int16_t cx, int16_t cy, uint16_t color) {
   switch (icon) {
     case WIFI:
-      display_obj.tft.drawLine(cx - 6, cy - 3, cx, cy - 7, color);
-      display_obj.tft.drawLine(cx, cy - 7, cx + 6, cy - 3, color);
-      display_obj.tft.drawLine(cx - 4, cy, cx, cy - 3, color);
-      display_obj.tft.drawLine(cx, cy - 3, cx + 4, cy, color);
-      display_obj.tft.fillCircle(cx, cy + 3, 1, color);
+      miniUiTft().drawLine(cx - 6, cy - 3, cx, cy - 7, color);
+      miniUiTft().drawLine(cx, cy - 7, cx + 6, cy - 3, color);
+      miniUiTft().drawLine(cx - 4, cy, cx, cy - 3, color);
+      miniUiTft().drawLine(cx, cy - 3, cx + 4, cy, color);
+      miniUiTft().fillCircle(cx, cy + 3, 1, color);
       break;
 
     case BLUETOOTH:
     case BLUETOOTH_SNIFF:
-      display_obj.tft.drawFastVLine(cx, cy - 7, 15, color);
-      display_obj.tft.drawLine(cx, cy - 7, cx + 5, cy - 2, color);
-      display_obj.tft.drawLine(cx + 5, cy - 2, cx - 4, cy + 5, color);
-      display_obj.tft.drawLine(cx, cy + 7, cx + 5, cy + 2, color);
-      display_obj.tft.drawLine(cx + 5, cy + 2, cx - 4, cy - 5, color);
+      miniUiTft().drawFastVLine(cx, cy - 7, 15, color);
+      miniUiTft().drawLine(cx, cy - 7, cx + 5, cy - 2, color);
+      miniUiTft().drawLine(cx + 5, cy - 2, cx - 4, cy + 5, color);
+      miniUiTft().drawLine(cx, cy + 7, cx + 5, cy + 2, color);
+      miniUiTft().drawLine(cx + 5, cy + 2, cx - 4, cy - 5, color);
       break;
 
     case GPS_MENU:
-      display_obj.tft.drawCircle(cx, cy - 2, 5, color);
-      display_obj.tft.fillCircle(cx, cy - 2, 1, color);
-      display_obj.tft.drawLine(cx - 3, cy + 2, cx, cy + 7, color);
-      display_obj.tft.drawLine(cx + 3, cy + 2, cx, cy + 7, color);
+      miniUiTft().drawCircle(cx, cy - 2, 5, color);
+      miniUiTft().fillCircle(cx, cy - 2, 1, color);
+      miniUiTft().drawLine(cx - 3, cy + 2, cx, cy + 7, color);
+      miniUiTft().drawLine(cx + 3, cy + 2, cx, cy + 7, color);
       break;
 
     case GENERAL_APPS:
-      display_obj.tft.drawRoundRect(cx - 7, cy - 4, 15, 9, 3, color);
-      display_obj.tft.drawFastHLine(cx - 5, cy, 5, color);
-      display_obj.tft.drawFastVLine(cx - 3, cy - 2, 5, color);
-      display_obj.tft.fillCircle(cx + 4, cy - 1, 1, color);
-      display_obj.tft.fillCircle(cx + 6, cy + 2, 1, color);
+      miniUiTft().drawRoundRect(cx - 7, cy - 4, 15, 9, 3, color);
+      miniUiTft().drawFastHLine(cx - 5, cy, 5, color);
+      miniUiTft().drawFastVLine(cx - 3, cy - 2, 5, color);
+      miniUiTft().fillCircle(cx + 4, cy - 1, 1, color);
+      miniUiTft().fillCircle(cx + 6, cy + 2, 1, color);
       break;
 
     case DEVICE:
     case DEVICE_INFO:
-      display_obj.tft.drawRect(cx - 5, cy - 5, 11, 11, color);
-      display_obj.tft.drawRect(cx - 2, cy - 2, 5, 5, color);
+      miniUiTft().drawRect(cx - 5, cy - 5, 11, 11, color);
+      miniUiTft().drawRect(cx - 2, cy - 2, 5, 5, color);
       for (int8_t p = -3; p <= 3; p += 3) {
-        display_obj.tft.drawFastVLine(cx + p, cy - 7, 2, color);
-        display_obj.tft.drawFastVLine(cx + p, cy + 6, 2, color);
-        display_obj.tft.drawFastHLine(cx - 7, cy + p, 2, color);
-        display_obj.tft.drawFastHLine(cx + 6, cy + p, 2, color);
+        miniUiTft().drawFastVLine(cx + p, cy - 7, 2, color);
+        miniUiTft().drawFastVLine(cx + p, cy + 6, 2, color);
+        miniUiTft().drawFastHLine(cx - 7, cy + p, 2, color);
+        miniUiTft().drawFastHLine(cx + 6, cy + p, 2, color);
       }
       break;
 
     case REBOOT:
-      display_obj.tft.drawCircle(cx, cy, 6, color);
-      display_obj.tft.drawFastVLine(cx, cy - 8, 7, color);
+      miniUiTft().drawCircle(cx, cy, 6, color);
+      miniUiTft().drawFastVLine(cx, cy - 8, 7, color);
       break;
 
     case SNIFFERS:
     case BEACON_SNIFF:
     case DEAUTH_SNIFF:
     case PROBE_SNIFF:
-      display_obj.tft.drawFastVLine(cx, cy - 1, 8, color);
-      display_obj.tft.fillCircle(cx, cy - 3, 1, color);
-      display_obj.tft.drawLine(cx - 3, cy - 5, cx - 5, cy - 2, color);
-      display_obj.tft.drawLine(cx + 3, cy - 5, cx + 5, cy - 2, color);
-      display_obj.tft.drawLine(cx - 5, cy + 7, cx + 5, cy + 7, color);
+      miniUiTft().drawFastVLine(cx, cy - 1, 8, color);
+      miniUiTft().fillCircle(cx, cy - 3, 1, color);
+      miniUiTft().drawLine(cx - 3, cy - 5, cx - 5, cy - 2, color);
+      miniUiTft().drawLine(cx + 3, cy - 5, cx + 5, cy - 2, color);
+      miniUiTft().drawLine(cx - 5, cy + 7, cx + 5, cy + 7, color);
       break;
 
     case SCANNERS:
-      display_obj.tft.drawCircle(cx - 2, cy - 2, 5, color);
-      display_obj.tft.drawLine(cx + 2, cy + 2, cx + 7, cy + 7, color);
+      miniUiTft().drawCircle(cx - 2, cy - 2, 5, color);
+      miniUiTft().drawLine(cx + 2, cy + 2, cx + 7, cy + 7, color);
       break;
 
     case ATTACKS:
-      display_obj.tft.drawLine(cx + 1, cy - 8, cx - 5, cy + 1, color);
-      display_obj.tft.drawLine(cx - 5, cy + 1, cx, cy + 1, color);
-      display_obj.tft.drawLine(cx, cy + 1, cx - 1, cy + 8, color);
-      display_obj.tft.drawLine(cx - 1, cy + 8, cx + 6, cy - 2, color);
-      display_obj.tft.drawLine(cx + 6, cy - 2, cx + 1, cy - 2, color);
-      display_obj.tft.drawLine(cx + 1, cy - 2, cx + 1, cy - 8, color);
+      miniUiTft().drawLine(cx + 1, cy - 8, cx - 5, cy + 1, color);
+      miniUiTft().drawLine(cx - 5, cy + 1, cx, cy + 1, color);
+      miniUiTft().drawLine(cx, cy + 1, cx - 1, cy + 8, color);
+      miniUiTft().drawLine(cx - 1, cy + 8, cx + 6, cy - 2, color);
+      miniUiTft().drawLine(cx + 6, cy - 2, cx + 1, cy - 2, color);
+      miniUiTft().drawLine(cx + 1, cy - 2, cx + 1, cy - 8, color);
       break;
 
     case SETTINGS:
     case BRIGHTNESS:
-      display_obj.tft.drawCircle(cx, cy, 5, color);
-      display_obj.tft.fillCircle(cx, cy, 1, color);
-      display_obj.tft.drawFastVLine(cx, cy - 8, 3, color);
-      display_obj.tft.drawFastVLine(cx, cy + 6, 3, color);
-      display_obj.tft.drawFastHLine(cx - 8, cy, 3, color);
-      display_obj.tft.drawFastHLine(cx + 6, cy, 3, color);
+      miniUiTft().drawCircle(cx, cy, 5, color);
+      miniUiTft().fillCircle(cx, cy, 1, color);
+      miniUiTft().drawFastVLine(cx, cy - 8, 3, color);
+      miniUiTft().drawFastVLine(cx, cy + 6, 3, color);
+      miniUiTft().drawFastHLine(cx - 8, cy, 3, color);
+      miniUiTft().drawFastHLine(cx + 6, cy, 3, color);
       break;
 
     default:
-      display_obj.tft.drawCircle(cx, cy, 5, color);
-      display_obj.tft.fillCircle(cx, cy, 1, color);
+      miniUiTft().drawCircle(cx, cy, 5, color);
+      miniUiTft().fillCircle(cx, cy, 1, color);
       break;
   }
 }
@@ -147,16 +168,16 @@ void drawMiniTileLabel(const String& label,
                        uint16_t foreground,
                        uint16_t background,
                        uint16_t text_offset) {
-  const int16_t text_width = display_obj.tft.textWidth(label);
+  const int16_t text_width = miniUiTft().textWidth(label);
   const int16_t viewport_width = max((int16_t)1, (int16_t)(width - 4));
   const int16_t cursor_x = text_width > viewport_width
                              ? -static_cast<int16_t>(text_offset)
                              : max((int16_t)0, (int16_t)((viewport_width - text_width) / 2));
-  display_obj.tft.setTextColor(foreground, background);
-  display_obj.tft.setViewport(x + 2, y, viewport_width, 9);
-  display_obj.tft.setCursor(cursor_x, 0);
-  display_obj.tft.print(label);
-  display_obj.tft.resetViewport();
+  miniUiTft().setTextColor(foreground, background);
+  miniUiTft().setViewport(x + 2, y, viewport_width, 9);
+  miniUiTft().setCursor(cursor_x, 0);
+  miniUiTft().print(label);
+  miniUiTft().resetViewport();
 }
 #endif
 }
@@ -175,9 +196,9 @@ void MenuFunctions::drawMiniMenuButton(int b, int x, bool selected, uint16_t tex
     else if (current_menu == &bluetoothMenu && x == 3)
       label = "BLE Discovery";
 
-    display_obj.tft.setFreeFont(NULL);
-    display_obj.tft.setTextSize(1);
-    display_obj.tft.setTextWrap(false);
+    miniUiTft().setFreeFont(NULL);
+    miniUiTft().setTextSize(1);
+    miniUiTft().setTextWrap(false);
 
     if (current_menu == &mainMenu) {
       const int16_t card_x = 3 + ((x % 2) * 63);
@@ -190,8 +211,8 @@ void MenuFunctions::drawMiniMenuButton(int b, int x, bool selected, uint16_t tex
       if (!selected && mini_node.icon == REBOOT)
         icon_color = MINI_UI_DANGER;
 
-      display_obj.tft.fillRoundRect(card_x, card_y, card_width, card_height, 5, background);
-      display_obj.tft.drawRoundRect(card_x, card_y, card_width, card_height, 5, border);
+      miniUiTft().fillRoundRect(card_x, card_y, card_width, card_height, 5, background);
+      miniUiTft().drawRoundRect(card_x, card_y, card_width, card_height, 5, border);
       drawMiniSymbol(mini_node.icon, card_x + (card_width / 2), card_y + 10, icon_color);
       drawMiniTileLabel(label, card_x, card_y + 22, card_width, MINI_UI_TEXT, background, text_offset);
       return;
@@ -201,7 +222,7 @@ void MenuFunctions::drawMiniMenuButton(int b, int x, bool selected, uint16_t tex
     const bool is_bluetooth_category = (current_menu == &bluetoothMenu);
     if ((is_wifi_category || is_bluetooth_category) && x == 0) {
       const uint16_t background = selected ? MINI_UI_ACCENT : MINI_UI_SURFACE;
-      display_obj.tft.fillRoundRect(2, 9, 17, 10, 4, background);
+      miniUiTft().fillRoundRect(2, 9, 17, 10, 4, background);
       drawMiniBackGlyph(7, 10, selected ? MINI_UI_TEXT : MINI_UI_MUTED);
       return;
     }
@@ -219,8 +240,8 @@ void MenuFunctions::drawMiniMenuButton(int b, int x, bool selected, uint16_t tex
       if (x == 4)
         category_icon = SETTINGS;
 
-      display_obj.tft.fillRoundRect(card_x, card_y, card_width, card_height, 6, background);
-      display_obj.tft.drawRoundRect(card_x, card_y, card_width, card_height, 6, border);
+      miniUiTft().fillRoundRect(card_x, card_y, card_width, card_height, 6, background);
+      miniUiTft().drawRoundRect(card_x, card_y, card_width, card_height, 6, border);
       drawMiniSymbol(category_icon, card_x + (card_width / 2), card_y + 17, icon_color);
       drawMiniTileLabel(label, card_x, card_y + 34, card_width, MINI_UI_TEXT, background, text_offset);
       return;
@@ -235,14 +256,14 @@ void MenuFunctions::drawMiniMenuButton(int b, int x, bool selected, uint16_t tex
       const uint16_t border = selected ? MINI_UI_ACCENT : MINI_UI_BORDER;
       const uint16_t icon_color = selected ? MINI_UI_TEXT : MINI_UI_MUTED;
 
-      display_obj.tft.fillRoundRect(card_x, card_y, card_width, card_height, 6, background);
-      display_obj.tft.drawRoundRect(card_x, card_y, card_width, card_height, 6, border);
+      miniUiTft().fillRoundRect(card_x, card_y, card_width, card_height, 6, background);
+      miniUiTft().drawRoundRect(card_x, card_y, card_width, card_height, 6, border);
       drawMiniSymbol(mini_node.icon, card_x + 12, card_y + 14, icon_color);
-      display_obj.tft.setTextColor(MINI_UI_TEXT, background);
-      display_obj.tft.setViewport(card_x + 24, card_y + 10, 80, 9);
-      display_obj.tft.setCursor(-static_cast<int16_t>(text_offset), 0);
-      display_obj.tft.print(label);
-      display_obj.tft.resetViewport();
+      miniUiTft().setTextColor(MINI_UI_TEXT, background);
+      miniUiTft().setViewport(card_x + 24, card_y + 10, 80, 9);
+      miniUiTft().setCursor(-static_cast<int16_t>(text_offset), 0);
+      miniUiTft().print(label);
+      miniUiTft().resetViewport();
       drawMiniChevron(card_x + 109, card_y + 11, selected ? MINI_UI_TEXT : MINI_UI_MUTED);
       return;
     }
@@ -260,8 +281,8 @@ void MenuFunctions::drawMiniMenuButton(int b, int x, bool selected, uint16_t tex
                             lower_label.indexOf("erase") >= 0 || lower_label.indexOf("clear") >= 0);
     const uint16_t detail_color = selected ? MINI_UI_TEXT : (is_danger ? MINI_UI_DANGER : MINI_UI_MUTED);
 
-    display_obj.tft.fillRoundRect(row_x, row_y, row_width, row_height, 4, background);
-    display_obj.tft.drawRoundRect(row_x, row_y, row_width, row_height, 4, border);
+    miniUiTft().fillRoundRect(row_x, row_y, row_width, row_height, 4, background);
+    miniUiTft().drawRoundRect(row_x, row_y, row_width, row_height, 4, border);
     if (x == 0 && current_menu->parentMenu != NULL)
       drawMiniBackGlyph(row_x + 7, row_y + 3, detail_color);
     else
@@ -269,18 +290,18 @@ void MenuFunctions::drawMiniMenuButton(int b, int x, bool selected, uint16_t tex
 
     const int16_t text_x = row_x + 19;
     const int16_t text_end = is_setting_node ? row_x + 91 : row_x + 108;
-    display_obj.tft.setTextColor(MINI_UI_TEXT, background);
-    display_obj.tft.setViewport(text_x, row_y, max((int16_t)1, (int16_t)(text_end - text_x)), row_height);
-    display_obj.tft.setCursor(-static_cast<int16_t>(text_offset), 4);
-    display_obj.tft.print(label);
-    display_obj.tft.resetViewport();
+    miniUiTft().setTextColor(MINI_UI_TEXT, background);
+    miniUiTft().setViewport(text_x, row_y, max((int16_t)1, (int16_t)(text_end - text_x)), row_height);
+    miniUiTft().setCursor(-static_cast<int16_t>(text_offset), 4);
+    miniUiTft().print(label);
+    miniUiTft().resetViewport();
 
     if (is_setting_node) {
       const int16_t toggle_x = row_x + 94;
       const int16_t toggle_y = row_y + 3;
       const uint16_t toggle_color = mini_node.selected ? MINI_UI_ACCENT : MINI_UI_BORDER;
-      display_obj.tft.fillRoundRect(toggle_x, toggle_y, 22, 9, 5, toggle_color);
-      display_obj.tft.fillCircle(toggle_x + (mini_node.selected ? 17 : 5), toggle_y + 4, 3, MINI_UI_TEXT);
+      miniUiTft().fillRoundRect(toggle_x, toggle_y, 22, 9, 5, toggle_color);
+      miniUiTft().fillCircle(toggle_x + (mini_node.selected ? 17 : 5), toggle_y + 4, 3, MINI_UI_TEXT);
     }
     else {
       drawMiniChevron(row_x + 111, row_y + 4, detail_color);
@@ -5117,6 +5138,83 @@ void MenuFunctions::buildButtons(Menu *menu, int starting_index, const char* but
                                   1);
   }
 }
+
+#ifdef MARAUDER_MINI_V3
+bool MenuFunctions::renderCurrentMenu(TFT_eSPI& target)
+{
+  if (!current_menu || !current_menu->list)
+    return false;
+
+  MiniUiRenderTargetGuard target_guard(target);
+  target.fillScreen(TFT_BLACK);
+  target.setCursor(0, 0);
+  target.setFreeFont(NULL);
+  target.setTextSize(1);
+  target.setTextWrap(false);
+
+  String mini_title = current_menu == &mainMenu ? "Marauder Eternal" : current_menu->name;
+  mini_title.trim();
+  if (mini_title.length() > 20)
+    mini_title = mini_title.substring(0, 18) + "..";
+
+  target.fillRect(0, STATUS_BAR_WIDTH, SCREEN_WIDTH, TEXT_HEIGHT, TFT_BLACK);
+  target.setTextColor(TFT_WHITE, TFT_BLACK);
+  target.setCursor((SCREEN_WIDTH - (mini_title.length() * 6)) / 2, STATUS_BAR_WIDTH);
+  target.println(mini_title);
+
+  // Recreate the Mini V3 status bar from the same state values used by the
+  // live UI. This target has no battery field and represents GPS through its
+  // menus rather than a status-bar glyph.
+  target.fillRect(0, 0, SCREEN_WIDTH, STATUS_BAR_WIDTH, STATUSBAR_COLOR);
+  target.setTextColor(TFT_WHITE, STATUSBAR_COLOR);
+  target.drawString("CH:" + String(wifi_scan_obj.old_channel), TFT_WIDTH / 4, 0, 1);
+
+  const size_t total_heap = ESP.getHeapSize();
+  const size_t displayed_free_heap = wifi_scan_obj.old_free_ram.toInt();
+  const uint8_t displayed_dram_percent = total_heap == 0 ||
+                                           wifi_scan_obj.old_free_ram.length() == 0 ||
+                                           displayed_free_heap > total_heap
+                                           ? getDRAMUsagePercent()
+                                           : ((total_heap - displayed_free_heap) * 100) / total_heap;
+  target.drawString(String(displayed_dram_percent) + "%", TFT_WIDTH / 1.75, 0, 1);
+  target.setTextColor(sd_obj.supported ? MINI_UI_ACCENT : MINI_UI_MUTED, STATUSBAR_COLOR);
+  target.drawString("SD", TFT_WIDTH - 12, 0, 1);
+
+  const int start_index = menu_start_index;
+  for (uint16_t i = start_index;
+       i < min(start_index + BUTTON_SCREEN_LIMIT, current_menu->list->size());
+       ++i) {
+    const bool selected = current_menu->selected == i ||
+                          ((current_menu->list->get(i).icon != SETTINGS ||
+                            current_menu->list->get(i).color != TFTLIGHTGREY) &&
+                           current_menu->list->get(i).selected);
+    const uint16_t text_offset = selected && mini_marquee_menu == current_menu &&
+                                 mini_marquee_index == static_cast<int16_t>(i)
+                                   ? mini_marquee_offset
+                                   : 0;
+    this->drawMiniMenuButton(i - start_index, i, selected, text_offset);
+  }
+
+  if (current_menu != &mainMenu && current_menu != &wifiMenu &&
+      current_menu != &bluetoothMenu &&
+      current_menu->list->size() > BUTTON_SCREEN_LIMIT) {
+    const int16_t track_y = 22;
+    const int16_t track_height = 100;
+    const int16_t thumb_height = max(
+        (int16_t)10,
+        (int16_t)((track_height * BUTTON_SCREEN_LIMIT) / current_menu->list->size()));
+    const int16_t maximum_start = current_menu->list->size() - BUTTON_SCREEN_LIMIT;
+    const int16_t thumb_y = track_y +
+        ((track_height - thumb_height) * menu_start_index / maximum_start);
+    target.fillRoundRect(126, track_y, 2, track_height, 1, MINI_UI_BORDER);
+    target.fillRoundRect(126, thumb_y, 2, thumb_height, 1, MINI_UI_ACCENT);
+  }
+
+  target.resetViewport();
+  target.setFreeFont(NULL);
+  return true;
+}
+#endif
 
 void MenuFunctions::displayCurrentMenu(int start_index)
 {

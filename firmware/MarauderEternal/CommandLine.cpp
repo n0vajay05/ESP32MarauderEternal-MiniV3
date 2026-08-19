@@ -237,6 +237,7 @@ void CommandLine::runCommand(String input) {
     Serial.println(HELP_NMEA_CMD);
     Serial.println(HELP_GPS_POI_CMD);
     Serial.println(HELP_GPS_TRACKER_CMD);
+    Serial.println(HELP_SCREENSHOT_CMD);
     
     // WiFi sniff/scan
     Serial.println(HELP_EVIL_PORTAL_CMD);
@@ -303,8 +304,50 @@ void CommandLine::runCommand(String input) {
     return;
   }
 
+  // Re-render the current menu into a 16-bit shadow framebuffer and stream it
+  // as RGB888. Direct controller RAM readback returned uniform data through
+  // this Mini V3's shared TFT_MISO path, so it cannot provide a useful frame.
+  if (cmd_args.get(0) == SCREENSHOT_CMD) {
+    #ifdef MARAUDER_MINI_V3
+      constexpr size_t screenshot_row_bytes = TFT_WIDTH * 3;
+      uint8_t row[screenshot_row_bytes];
+      TFT_eSprite frame(&display_obj.tft);
+      frame.setColorDepth(16);
+
+      if (!frame.createSprite(TFT_WIDTH, TFT_HEIGHT) ||
+          !menu_function_obj.renderCurrentMenu(frame)) {
+        Serial.println(F("Screenshot unavailable: framebuffer allocation failed"));
+        return;
+      }
+
+      Serial.printf("SCREENSHOT-BEGIN RGB888 %u %u %u\n",
+                    static_cast<unsigned>(TFT_WIDTH),
+                    static_cast<unsigned>(TFT_HEIGHT),
+                    static_cast<unsigned>(TFT_WIDTH * TFT_HEIGHT * 3));
+      Serial.flush();
+
+      for (int16_t y = 0; y < TFT_HEIGHT; ++y) {
+        for (int16_t x = 0; x < TFT_WIDTH; ++x) {
+          const uint16_t pixel = frame.readPixel(x, y);
+          row[x * 3] = (pixel >> 8) & 0xF8;
+          row[x * 3] |= row[x * 3] >> 5;
+          row[x * 3 + 1] = (pixel >> 3) & 0xFC;
+          row[x * 3 + 1] |= row[x * 3 + 1] >> 6;
+          row[x * 3 + 2] = (pixel << 3) & 0xF8;
+          row[x * 3 + 2] |= row[x * 3 + 2] >> 5;
+        }
+        Serial.write(row, screenshot_row_bytes);
+      }
+
+      Serial.flush();
+      Serial.println();
+      Serial.println(F("SCREENSHOT-END"));
+    #else
+      Serial.println(F("Screenshot unavailable: this target has no menu framebuffer"));
+    #endif
+  }
   // Stop Scan
-  if (cmd_args.get(0) == STOPSCAN_CMD) {
+  else if (cmd_args.get(0) == STOPSCAN_CMD) {
     int f_arg = this->argSearch(&cmd_args, "-f");
     
     uint8_t old_scan_mode=wifi_scan_obj.currentScanMode;
