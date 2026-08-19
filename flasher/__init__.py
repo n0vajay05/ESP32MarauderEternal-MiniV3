@@ -1,0 +1,1 @@
+"""Marauder Eternal desktop flasher."""

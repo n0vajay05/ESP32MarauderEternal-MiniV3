@@ -1,0 +1,50 @@
+name: Build desktop flashers
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - "flasher/**"
+      - "scripts/build-gui-*"
+      - "release/Marauder_Eternal_1.14.3_MiniV3_ESP32-C5.bin"
+      - ".github/workflows/build-flasher.yml"
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            platform: linux
+            executable: MarauderEternalFlasher
+          - os: windows-latest
+            platform: windows
+            executable: MarauderEternalFlasher.exe
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+          cache-dependency-path: flasher/requirements-build.txt
+      - name: Install dependencies
+        run: python -m pip install -r flasher/requirements-build.txt
+      - name: Test
+        run: python -m unittest discover -v
+      - name: Build
+        run: >-
+          pyinstaller --clean --noconfirm
+          --distpath dist/${{ matrix.platform }}
+          --workpath .build/pyinstaller-${{ matrix.platform }}
+          flasher/MarauderEternalFlasher.spec
+      - name: Bundled self-test
+        shell: bash
+        run: ./dist/${{ matrix.platform }}/${{ matrix.executable }} --self-test
+      - uses: actions/upload-artifact@v4
+        with:
+          name: MarauderEternalFlasher-${{ matrix.platform }}
+          path: dist/${{ matrix.platform }}/${{ matrix.executable }}
+          if-no-files-found: error
