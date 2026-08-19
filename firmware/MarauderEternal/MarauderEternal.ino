@@ -132,7 +132,7 @@ static void drawMarauderEternalSplash() {
     drawSplashText("ETERNAL", TFT_WIDTH / 2, 11, 0x733F);
     drawSplashText("Version " MARAUDER_VERSION, TFT_WIDTH / 2, 95, TFT_WHITE);
     drawSplashText("JustCallMeKoKo/", TFT_WIDTH / 2, 106, TFT_LIGHTGREY);
-    drawSplashText("N0vajay05", TFT_WIDTH / 2, 116, TFT_LIGHTGREY);
+    drawSplashText("n0vajay05", TFT_WIDTH / 2, 116, TFT_LIGHTGREY);
   #else
     #if defined(MARAUDER_CARDPUTER) || defined(MARAUDER_CARDPUTER_ADV)
       const int16_t splash_center_x = TFT_HEIGHT / 2;
@@ -146,7 +146,7 @@ static void drawMarauderEternalSplash() {
                    splash_height * 0.30, TFT_WHITE);
     drawSplashText("Version " MARAUDER_VERSION, splash_center_x,
                    splash_height * 0.48, 0x733F);
-    drawSplashText("JustCallMeKoKo/N0vajay05", splash_center_x,
+    drawSplashText("JustCallMeKoKo/n0vajay05", splash_center_x,
                    splash_height * 0.66, TFT_LIGHTGREY);
   #endif
 

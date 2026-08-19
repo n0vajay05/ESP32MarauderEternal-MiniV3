@@ -9,11 +9,11 @@
   "esp32_arduino_core": "3.3.4",
   "source_base_commit": "de42658f8c77df2280b3d202aa2393d77b70f31e",
   "build_date": "2026-08-19",
-  "factory_image": {
-    "file": "Marauder_Eternal_1.14.3_MiniV3_ESP32-C5.factory.bin",
+  "full_device_image": {
+    "file": "Marauder_Eternal_1.14.3_MiniV3_ESP32-C5.bin",
     "offset": "0x0",
     "bytes": 8388608,
-    "sha256": "8904dccf000fcf4f09fd3b28e14bdbcbd84d19e1b93d3a096d405d794c4e2524",
+    "sha256": "4933f510e8b7bb6d71ece62285606e30733621bb245f2b32ea478c469a80dec1",
     "contains": [
       "bootloader@0x2000",
       "partitions@0x8000",
@@ -43,8 +43,8 @@
     {
       "file": "Marauder_Eternal_1.14.3_MiniV3_ESP32-C5.app.bin",
       "offset": "0x10000",
-      "bytes": 2372240,
-      "sha256": "59e504f4c6ecb5da5b3337cf0b8215f38816f22132ce40ea1368515942100afb"
+      "bytes": 2377648,
+      "sha256": "35d7d825c52851f0639c11b9dc261f307fa4b1ab94118755bb9fe8b71a1f3e1b"
     }
   ]
 }

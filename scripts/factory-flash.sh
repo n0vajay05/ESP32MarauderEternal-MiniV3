@@ -15,9 +15,9 @@ fi
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
 RELEASE_DIR="${PROJECT_DIR}/release"
-FACTORY_FILENAME="Marauder_Eternal_1.14.3_MiniV3_ESP32-C5.factory.bin"
-FACTORY_IMAGE="${RELEASE_DIR}/${FACTORY_FILENAME}"
-FACTORY_SHA256="8904dccf000fcf4f09fd3b28e14bdbcbd84d19e1b93d3a096d405d794c4e2524"
+FULL_IMAGE_FILENAME="Marauder_Eternal_1.14.3_MiniV3_ESP32-C5.bin"
+FULL_IMAGE="${RELEASE_DIR}/${FULL_IMAGE_FILENAME}"
+FULL_IMAGE_SHA256="4933f510e8b7bb6d71ece62285606e30733621bb245f2b32ea478c469a80dec1"
 
 if [[ -n "${ESPTOOL_BIN:-}" ]]; then
   ESPTOOL="${ESPTOOL_BIN}"
@@ -32,14 +32,14 @@ else
   exit 1
 fi
 
-if [[ ! -f "${FACTORY_IMAGE}" ]]; then
-  echo "Factory image was not found: ${FACTORY_IMAGE}" >&2
+if [[ ! -f "${FULL_IMAGE}" ]]; then
+  echo "Full-device image was not found: ${FULL_IMAGE}" >&2
   exit 1
 fi
 
-printf '%s  %s\n' "${FACTORY_SHA256}" "${FACTORY_FILENAME}" | \
+printf '%s  %s\n' "${FULL_IMAGE_SHA256}" "${FULL_IMAGE_FILENAME}" | \
   (cd "${RELEASE_DIR}" && sha256sum --check -)
 "${ESPTOOL}" --chip esp32c5 --port "${PORT}" chip-id
 "${ESPTOOL}" --chip esp32c5 --port "${PORT}" --baud 460800 \
   --before default-reset --after hard-reset \
-  write-flash 0x0 "${FACTORY_IMAGE}"
+  write-flash 0x0 "${FULL_IMAGE}"

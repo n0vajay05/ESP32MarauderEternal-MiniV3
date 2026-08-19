@@ -52,7 +52,7 @@ For a blank board, or when the bootloader and partition table must also be
 restored, use this one firmware payload:
 
 ```text
-release/Marauder_Eternal_1.14.3_MiniV3_ESP32-C5.factory.bin
+release/Marauder_Eternal_1.14.3_MiniV3_ESP32-C5.bin
 ```
 
 It is an 8 MB merged image containing the ESP32-C5 bootloader, partition

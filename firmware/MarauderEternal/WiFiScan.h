@@ -818,7 +818,7 @@ class WiFiScan
     static MacEntry mac_entries[mac_history_len_half];
     static uint8_t mac_entry_state[mac_history_len_half];
 
-    String header_line = "WigleWifi-1.4,appRelease=" + (String)MARAUDER_VERSION + ",model=ESP32 Marauder Eternal,release=" + (String)MARAUDER_VERSION + ",device=Marauder Mini V3,display=128x128 SPI TFT,board=ESP32-C5,brand=JustCallMeKoKo/N0vajay05\nMAC,SSID,AuthMode,FirstSeen,Channel,RSSI,CurrentLatitude,CurrentLongitude,AltitudeMeters,AccuracyMeters,Type\n";
+    String header_line = "WigleWifi-1.4,appRelease=" + (String)MARAUDER_VERSION + ",model=ESP32 Marauder Eternal,release=" + (String)MARAUDER_VERSION + ",device=Marauder Mini V3,display=128x128 SPI TFT,board=ESP32-C5,brand=JustCallMeKoKo/n0vajay05\nMAC,SSID,AuthMode,FirstSeen,Channel,RSSI,CurrentLatitude,CurrentLongitude,AltitudeMeters,AccuracyMeters,Type\n";
 
     uint8_t dual_band_channels[DUAL_BAND_CHANNELS] = {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 32, 36, 40, 44, 48, 52, 56, 60, 64, 68, 72, 76, 80, 84, 88, 92, 96, 100, 104, 108, 112, 116, 120, 124, 128, 132, 136, 140, 144, 149, 153, 157, 161, 165, 169, 173, 177};
 

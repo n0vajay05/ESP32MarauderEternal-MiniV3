@@ -29,12 +29,19 @@ constexpr uint16_t MINI_MARQUEE_STEP_MS = 40;
 constexpr uint16_t MINI_MARQUEE_PAUSE_MS = 900;
 
 #ifdef MARAUDER_MINI_V3
+constexpr uint16_t MINI_MENU_REPEAT_DELAY_MS = 450;
+constexpr uint16_t MINI_MENU_REPEAT_INTERVAL_MS = 120;
 constexpr uint16_t MINI_UI_SURFACE = 0x18E3;
 constexpr uint16_t MINI_UI_BORDER = 0x31A6;
 constexpr uint16_t MINI_UI_ACCENT = 0x733F;
 constexpr uint16_t MINI_UI_TEXT = TFT_WHITE;
 constexpr uint16_t MINI_UI_MUTED = 0xA514;
 constexpr uint16_t MINI_UI_DANGER = TFT_RED;
+
+bool miniMenuButtonDown(Switches& button) {
+  const bool level = digitalRead(button.getPin());
+  return button.getPullup() ? level == LOW : level == HIGH;
+}
 
 TFT_eSPI* mini_ui_render_target = nullptr;
 
@@ -268,6 +275,29 @@ void MenuFunctions::drawMiniMenuButton(int b, int x, bool selected, uint16_t tex
       return;
     }
 
+    if (current_menu == &bleTargetDetailsMenu && (x == 1 || x == 2)) {
+      const int16_t row_x = 4;
+      const int16_t row_y = 22 + (b * 17);
+      const int16_t row_width = 120;
+      const int16_t row_height = 15;
+      const int16_t text_width = miniUiTft().textWidth(label);
+      const int16_t viewport_width = row_width - 4;
+      const int16_t cursor_x = text_width > viewport_width
+                                 ? -static_cast<int16_t>(text_offset)
+                                 : (viewport_width - text_width) / 2;
+      const uint16_t background = selected ? MINI_UI_ACCENT : MINI_UI_SURFACE;
+
+      miniUiTft().fillRoundRect(row_x, row_y, row_width, row_height, 4, background);
+      miniUiTft().drawRoundRect(row_x, row_y, row_width, row_height, 4,
+                                selected ? MINI_UI_ACCENT : MINI_UI_BORDER);
+      miniUiTft().setTextColor(MINI_UI_TEXT, background);
+      miniUiTft().setViewport(row_x + 2, row_y, viewport_width, row_height);
+      miniUiTft().setCursor(cursor_x, 4);
+      miniUiTft().print(label);
+      miniUiTft().resetViewport();
+      return;
+    }
+
     const bool is_setting_node = (mini_node.icon == SETTINGS && mini_node.color == TFTLIGHTGREY);
     const int16_t row_x = 4;
     const int16_t row_y = 22 + (b * 17);
@@ -388,6 +418,10 @@ void MenuFunctions::updateMiniMenuMarquee(uint32_t current_time) {
       else if (selected_index == 3)
         marquee_label = "BLE Discovery";
       available_width = 80;
+    }
+    else if (current_menu == &bleTargetDetailsMenu &&
+             (selected_index == 1 || selected_index == 2)) {
+      available_width = 116;
     }
     else {
       const bool is_setting_node = (selected_node.icon == SETTINGS && selected_node.color == TFTLIGHTGREY);
@@ -525,6 +559,65 @@ void MenuFunctions::navigateMiniMenu(int8_t horizontal, int8_t vertical) {
   }
 
   this->selectMiniMenuIndex(target_index);
+}
+
+void MenuFunctions::updateMiniMenuNavigationRepeat(uint32_t current_time) {
+  const bool menu_active = wifi_scan_obj.currentScanMode == WIFI_SCAN_OFF ||
+                           wifi_scan_obj.currentScanMode == WIFI_CONNECTED ||
+                           wifi_scan_obj.currentScanMode == OTA_UPDATE;
+  if (!menu_active || !current_menu || !current_menu->list ||
+      current_menu->list->size() == 0) {
+    mini_menu_repeat_direction = 0;
+    mini_menu_repeat_enabled = false;
+    return;
+  }
+
+  uint8_t direction = 0;
+  uint8_t pressed_count = 0;
+  if (miniMenuButtonDown(u_btn)) {
+    direction = 1;
+    pressed_count++;
+  }
+  if (miniMenuButtonDown(d_btn)) {
+    direction = 2;
+    pressed_count++;
+  }
+  if (miniMenuButtonDown(l_btn)) {
+    direction = 3;
+    pressed_count++;
+  }
+  if (miniMenuButtonDown(r_btn)) {
+    direction = 4;
+    pressed_count++;
+  }
+
+  if (pressed_count != 1) {
+    mini_menu_repeat_direction = 0;
+    mini_menu_repeat_enabled = false;
+    return;
+  }
+
+  if (direction != mini_menu_repeat_direction) {
+    mini_menu_repeat_direction = direction;
+    mini_menu_repeat_enabled = direction <= 2 ||
+                               current_menu == &mainMenu ||
+                               current_menu == &wifiMenu;
+    mini_menu_repeat_next_step = current_time + MINI_MENU_REPEAT_DELAY_MS;
+    return;
+  }
+
+  if (!mini_menu_repeat_enabled ||
+      static_cast<int32_t>(current_time - mini_menu_repeat_next_step) < 0)
+    return;
+
+  switch (direction) {
+    case 1: this->navigateMiniMenu(0, -1); break;
+    case 2: this->navigateMiniMenu(0, 1); break;
+    case 3: this->navigateMiniMenu(-1, 0); break;
+    case 4: this->navigateMiniMenu(1, 0); break;
+    default: break;
+  }
+  mini_menu_repeat_next_step = current_time + MINI_MENU_REPEAT_INTERVAL_MS;
 }
 #endif
 #endif
@@ -1204,6 +1297,10 @@ void MenuFunctions::main(uint32_t currentTime)
     // Don't do this for touch screens
     #if !(defined(MARAUDER_V6) || defined(MARAUDER_V6_1) || defined(MARAUDER_CYD_MICRO) || defined(MARAUDER_CYD_GUITION) || defined(MARAUDER_CYD_2USB) || defined(MARAUDER_CYD_3_5_INCH))
       #if !defined(MARAUDER_M5STICKC) || defined(MARAUDER_M5STICKCP2)
+        #ifdef MARAUDER_MINI_V3
+          this->updateMiniMenuNavigationRepeat(currentTime);
+        #endif
+
         #if (U_BTN >= 0 || defined(MARAUDER_CARDPUTER) || defined(MARAUDER_CARDPUTER_ADV))
           #if (U_BTN >= 0)
             if (u_btn.justPressed()) {
@@ -1978,6 +2075,62 @@ void MenuFunctions::confirmBLEAction(const char* title,
   this->confirmAction(title, &bleSecurityMenu, action);
 }
 
+void MenuFunctions::showBLETargetDetails(int index, Menu* returnMenu,
+                                         bool startFoxHunt) {
+  extern LinkedList<BleDevice>* ble_devices;
+  if (index < 0 || index >= ble_devices->size()) {
+    this->changeMenu(returnMenu, true);
+    return;
+  }
+
+  const BleDevice device = ble_devices->get(index);
+  const String vendorLabel = BLESecurityTools::deviceDisplayLabel(device);
+  const String address = macToString(device.mac);
+
+  bleTargetDetailsMenu.list->clear();
+  bleTargetDetailsMenu.name = startFoxHunt ? "Fox Hunt Target" : "BLE Target Details";
+  bleTargetDetailsMenu.parentMenu = returnMenu;
+
+  this->addNodes(&bleTargetDetailsMenu, text09, TFTLIGHTGREY, 0,
+                 [this, returnMenu, index]() {
+    this->changeMenu(returnMenu, true, index + 1);
+  });
+  this->addNodes(&bleTargetDetailsMenu, vendorLabel.c_str(),
+                 rssiToMenuColor(device.rssi), DEVICE_INFO, []() {});
+  this->addNodes(&bleTargetDetailsMenu, address.c_str(),
+                 TFTWHITE, DEVICE_INFO, []() {});
+
+  const std::function<void()> confirmTarget = [this, index, returnMenu, startFoxHunt]() {
+    extern LinkedList<BleDevice>* ble_devices;
+    if (index < 0 || index >= ble_devices->size()) {
+      this->changeMenu(returnMenu, true);
+      return;
+    }
+
+    for (int other = 0; other < ble_devices->size(); other++) {
+      BleDevice candidate = ble_devices->get(other);
+      candidate.selected = other == index;
+      ble_devices->set(other, candidate);
+    }
+    BLESecurityTools::selectTarget(ble_devices->get(index));
+
+    if (startFoxHunt) {
+      display_obj.clearScreen();
+      this->drawStatusBar();
+      wifi_scan_obj.StartScan(BT_SCAN_FOX_HUNT, TFT_CYAN);
+    }
+    else {
+      this->changeMenu(&bleSecurityMenu, true);
+    }
+  };
+
+  this->addNodes(&bleTargetDetailsMenu,
+                 startFoxHunt ? "Start Fox Hunt" : "Select Target",
+                 TFTGREEN, startFoxHunt ? SCANNERS : BLUETOOTH,
+                 confirmTarget);
+  this->changeMenu(&bleTargetDetailsMenu, true, 3);
+}
+
 void MenuFunctions::buildEvilPortalActionMenu(const String& ssid) {
   selectedEvilPortalSSID = ssid;
   evilPortalActionMenu.list->clear();
@@ -2235,6 +2388,7 @@ void MenuFunctions::RunSetup()
   bluetoothAttackMenu.list = new LinkedList<MenuNode>();
   bleSecurityMenu.list = new LinkedList<MenuNode>();
   bleTargetMenu.list = new LinkedList<MenuNode>();
+  bleTargetDetailsMenu.list = new LinkedList<MenuNode>();
   bleConfirmMenu.list = new LinkedList<MenuNode>();
 
   // Settings stuff
@@ -2297,6 +2451,7 @@ void MenuFunctions::RunSetup()
   bluetoothAttackMenu.name = "Bluetooth Attacks";
   bleSecurityMenu.name = "BLE Discovery";
   bleTargetMenu.name = "Select BLE Target";
+  bleTargetDetailsMenu.name = "BLE Target Details";
   bleConfirmMenu.name = "Authorized Use Only";
   generateSSIDsMenu.name = text_table1[27];
   clearSSIDsMenu.name = text_table1[28];
@@ -3820,27 +3975,34 @@ void MenuFunctions::RunSetup()
       const String label = BLESecurityTools::deviceDisplayLabel(device);
       const uint8_t color = device.connectable ? rssiToMenuColor(device.rssi) : TFTDARKGREY;
       this->addNodes(&bleTargetMenu, label.c_str(), color, BLUETOOTH, [this, index]() {
-        extern LinkedList<BleDevice>* ble_devices;
-        for (int other = 0; other < ble_devices->size(); other++) {
-          BleDevice candidate = ble_devices->get(other);
-          candidate.selected = other == index;
-          ble_devices->set(other, candidate);
-        }
-        BLESecurityTools::selectTarget(ble_devices->get(index));
-        this->changeMenu(&bleSecurityMenu, true);
+        this->showBLETargetDetails(index, &bleTargetMenu, false);
       });
     }
     this->changeMenu(&bleTargetMenu, true);
   });
-  this->addNodes(&bleSecurityMenu, "Advertised Services", TFTGREEN, DEVICE_INFO, [this]() {
-    BLESecurityTools::showAdvertisedInfo();
+  this->addNodes(&bleSecurityMenu, "Fox Hunt", TFTCYAN, SCANNERS, [this]() {
+    extern LinkedList<BleDevice>* ble_devices;
+    foxHuntMenu.list->clear();
+    foxHuntMenu.parentMenu = &bleSecurityMenu;
+    this->addNodes(&foxHuntMenu, text09, TFTLIGHTGREY, 0, [this]() {
+      this->changeMenu(foxHuntMenu.parentMenu, true);
+    });
+    const int menuLimit = min(ble_devices->size(), 40);
+    for (int index = 0; index < menuLimit; index++) {
+      const BleDevice device = ble_devices->get(index);
+      const String label = BLESecurityTools::deviceDisplayLabel(device);
+      const uint8_t color = device.connectable ? rssiToMenuColor(device.rssi) : TFTDARKGREY;
+      this->addNodes(&foxHuntMenu, label.c_str(), color, BLUETOOTH, [this, index]() {
+        this->showBLETargetDetails(index, &foxHuntMenu, true);
+      });
+    }
+    this->changeMenu(&foxHuntMenu, true);
+  });
+  this->addNodes(&bleSecurityMenu, "GATT - Advertised Services Enumeration", TFTGREEN,
+                 DEVICE_INFO, [this]() {
+    BLESecurityTools::inspectTarget();
     display_obj.init();
     this->changeMenu(&bleSecurityMenu, true);
-  });
-  this->addNodes(&bleSecurityMenu, "GATT Service Enum", TFTBLUE, DEVICE_INFO, [this]() {
-    this->confirmBLEAction("Authorize BLE connect", []() {
-      BLESecurityTools::inspectTarget();
-    });
   });
   this->addNodes(&bleSecurityMenu, "Device Spoof", TFTMAGENTA, BLUETOOTH, [this]() {
     this->confirmBLEAction("Authorize device spoof", []() {
@@ -3852,11 +4014,6 @@ void MenuFunctions::RunSetup()
   bluetoothSnifferMenu.parentMenu = &bluetoothMenu; // Second Menu is third menu parent
   this->addNodes(&bluetoothSnifferMenu, text09, TFTLIGHTGREY, 0, [this]() {
     this->changeMenu(bluetoothSnifferMenu.parentMenu, true);
-  });
-  this->addNodes(&bluetoothSnifferMenu, text_table1[34], TFTGREEN, BLUETOOTH_SNIFF, [this]() {
-    display_obj.clearScreen();
-    this->drawStatusBar();
-    wifi_scan_obj.StartScan(BT_SCAN_ALL, TFT_GREEN);
   });
   this->addNodes(&bluetoothSnifferMenu, "Flipper Sniff", TFTORANGE, FLIPPER, [this]() {
     display_obj.clearScreen();
@@ -3924,33 +4081,6 @@ void MenuFunctions::RunSetup()
       this->changeMenu(&bluetoothSnifferMenu, true);
     });
   #endif
-  this->addNodes(&bluetoothSnifferMenu, "Fox Hunt", TFTCYAN, SCANNERS, [this]() {
-    foxHuntMenu.list->clear();
-
-    // Bluetooth Fox Hunt Menu
-    foxHuntMenu.parentMenu = &bluetoothSnifferMenu; // Second Menu is third menu parent
-    this->addNodes(&foxHuntMenu, text09, TFTLIGHTGREY, 0, [this]() {
-      this->changeMenu(foxHuntMenu.parentMenu, true);
-    });
-    
-    for (int i = 0; i < ble_devices->size(); i++) {
-      BleDevice ble_device = ble_devices->get(i);
-      ble_device.selected = false;
-      ble_devices->set(i, ble_device);
-      uint8_t node_color = rssiToMenuColor(ble_devices->get(i).rssi);
-      String node_name = String(ble_devices->get(i).rssi) + " " + ble_devices->get(i).name;
-      this->addNodes(&foxHuntMenu, node_name.c_str(), node_color, 255, [this, i](){
-        BleDevice ble_device = ble_devices->get(i);
-        ble_device.selected = true;
-        ble_devices->set(i, ble_device);
-        display_obj.clearScreen();
-        this->drawStatusBar();
-        wifi_scan_obj.StartScan(BT_SCAN_FOX_HUNT, TFT_CYAN);
-      });
-    }
-    this->changeMenu(&foxHuntMenu, true);
-  });
-
   // Bluetooth Attack menu
   bluetoothAttackMenu.parentMenu = &bluetoothMenu; // Second Menu is third menu parent
   this->addNodes(&bluetoothAttackMenu, text09, TFTLIGHTGREY, 0, [this]() {
@@ -5048,7 +5178,7 @@ uint16_t MenuFunctions::getColor(uint16_t color) {
 }
 
 // Function to change menu
-void MenuFunctions::changeMenu(Menu* menu, bool simple_change) {
+void MenuFunctions::changeMenu(Menu* menu, bool simple_change, uint16_t initial_selection) {
   if (!simple_change) {
     //display_obj.initScrollValues();
     //display_obj.setupScrollArea(TOP_FIXED_AREA, BOT_FIXED_AREA);
@@ -5061,15 +5191,23 @@ void MenuFunctions::changeMenu(Menu* menu, bool simple_change) {
   }
   current_menu = menu;
 
-  current_menu->selected = 0;
+  if (current_menu->list != nullptr && current_menu->list->size() > 0)
+    current_menu->selected = min(initial_selection,
+                                 static_cast<uint16_t>(current_menu->list->size() - 1));
+  else
+    current_menu->selected = 0;
+
+  const int starting_index = current_menu->selected >= BUTTON_SCREEN_LIMIT
+                               ? current_menu->selected + 1 - BUTTON_SCREEN_LIMIT
+                               : 0;
 
   #ifdef HAS_MINI_SCREEN
-    this->resetMiniMenuMarquee();
+  this->resetMiniMenuMarquee();
   #endif
 
-  buildButtons(menu);
+  buildButtons(menu, starting_index);
 
-  displayCurrentMenu();
+  displayCurrentMenu(starting_index);
 
   //#ifdef MARAUDER_V8
   //  digitalWrite(TFT_BL, HIGH);

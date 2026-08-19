@@ -146,6 +146,11 @@ class MenuFunctions
       int8_t mini_marquee_direction = 1;
       uint32_t mini_marquee_next_step = 0;
     #endif
+    #ifdef MARAUDER_MINI_V3
+      uint8_t mini_menu_repeat_direction = 0;
+      bool mini_menu_repeat_enabled = false;
+      uint32_t mini_menu_repeat_next_step = 0;
+    #endif
 
     // Main menu stuff
     Menu mainMenu;
@@ -203,6 +208,7 @@ class MenuFunctions
     Menu bluetoothAttackMenu;
     Menu bleSecurityMenu;
     Menu bleTargetMenu;
+    Menu bleTargetDetailsMenu;
     Menu bleConfirmMenu;
 
     // Settings things menus
@@ -247,6 +253,7 @@ class MenuFunctions
     void confirmAction(const char* title, Menu* returnMenu,
                        std::function<void()> action);
     void confirmBLEAction(const char* title, std::function<void()> action);
+    void showBLETargetDetails(int index, Menu* returnMenu, bool startFoxHunt);
     void buildEvilPortalActionMenu(const String& ssid);
     void buildEvilPortalCredentialsMenu();
     void battery(bool initial = false);
@@ -262,6 +269,7 @@ class MenuFunctions
       #ifdef MARAUDER_MINI_V3
         void selectMiniMenuIndex(int target_index);
         void navigateMiniMenu(int8_t horizontal, int8_t vertical);
+        void updateMiniMenuNavigationRepeat(uint32_t current_time);
       #endif
     #endif
     //#if (!defined(HAS_ILI9341) && defined(HAS_BUTTONS))
@@ -315,7 +323,7 @@ class MenuFunctions
     void setGraphScale(float scale);
     void updateStatusBar();
     void buildButtons(Menu* menu, int starting_index = 0, const char* button_name = nullptr);
-    void changeMenu(Menu* menu, bool simple_change = false);
+    void changeMenu(Menu* menu, bool simple_change = false, uint16_t initial_selection = 0);
     void drawStatusBar();
     void displayCurrentMenu(int start_index = 0);
     #ifdef MARAUDER_MINI_V3

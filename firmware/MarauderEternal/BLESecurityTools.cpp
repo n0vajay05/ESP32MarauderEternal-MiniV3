@@ -64,12 +64,86 @@ struct GattDisplayItem {
   char parentServiceUuid[37];
 };
 
-Target target{};
-
 constexpr uint32_t DEVICE_SPOOF_VARIANT_DWELL_MS = 1000;
 constexpr size_t DEVICE_SPOOF_MINIMUM_FREE_HEAP = 64 * 1024;
 constexpr size_t GATT_RESULTS_MINIMUM_FREE_HEAP = 48 * 1024;
-constexpr size_t GATT_RESULTS_MAX_ITEMS = 192;
+constexpr size_t GATT_DISPLAY_BLOCK_ITEMS = 32;
+constexpr uint16_t GATT_PAGE_REPEAT_DELAY_MS = 450;
+constexpr uint16_t GATT_PAGE_REPEAT_INTERVAL_MS = 120;
+
+struct GattDisplayBlock {
+  GattDisplayBlock* next;
+  size_t used;
+  GattDisplayItem items[GATT_DISPLAY_BLOCK_ITEMS];
+};
+
+class GattDisplayResults {
+ public:
+  GattDisplayResults() = default;
+  GattDisplayResults(const GattDisplayResults&) = delete;
+  GattDisplayResults& operator=(const GattDisplayResults&) = delete;
+
+  ~GattDisplayResults() {
+    GattDisplayBlock* block = first_;
+    while (block) {
+      GattDisplayBlock* next = block->next;
+      free(block);
+      block = next;
+    }
+  }
+
+  bool append(const GattDisplayItem& item) {
+    if (!last_ || last_->used == GATT_DISPLAY_BLOCK_ITEMS) {
+      GattDisplayBlock* block = nullptr;
+#ifdef HAS_PSRAM
+      if (ESP.getFreePsram() > sizeof(GattDisplayBlock) + 4096)
+        block = static_cast<GattDisplayBlock*>(ps_malloc(sizeof(GattDisplayBlock)));
+#endif
+      if (!block && ESP.getFreeHeap() > GATT_RESULTS_MINIMUM_FREE_HEAP + sizeof(GattDisplayBlock))
+        block = static_cast<GattDisplayBlock*>(malloc(sizeof(GattDisplayBlock)));
+      if (!block)
+        return false;
+
+      memset(block, 0, sizeof(GattDisplayBlock));
+      if (last_)
+        last_->next = block;
+      else
+        first_ = block;
+      last_ = block;
+    }
+
+    last_->items[last_->used++] = item;
+    itemCount_++;
+    return true;
+  }
+
+  bool empty() const {
+    return itemCount_ == 0;
+  }
+
+  size_t size() const {
+    return itemCount_;
+  }
+
+  const GattDisplayItem& operator[](size_t index) const {
+    const GattDisplayBlock* block = first_;
+    while (block && index >= block->used) {
+      index -= block->used;
+      block = block->next;
+    }
+    if (block)
+      return block->items[index];
+    static const GattDisplayItem emptyItem{};
+    return emptyItem;
+  }
+
+ private:
+  GattDisplayBlock* first_ = nullptr;
+  GattDisplayBlock* last_ = nullptr;
+  size_t itemCount_ = 0;
+};
+
+Target target{};
 
 enum GattProperty : uint8_t {
   GATT_PROPERTY_READ = 1 << 0,
@@ -112,6 +186,11 @@ String bytesAsHex(const uint8_t* bytes, size_t length) {
   return output;
 }
 
+String targetVendorName() {
+  const char* company = target.hasCompanyId ? BLECompanyIdentifiers::lookup(target.companyId) : nullptr;
+  return company && company[0] ? String(company) : String(F("UnknownVendor"));
+}
+
 #ifdef HAS_SD
 String singleLineText(const char* value) {
   String text(value ? value : "");
@@ -120,12 +199,40 @@ String singleLineText(const char* value) {
   return text;
 }
 
+String filenameToken(const String& value, size_t maximumLength) {
+  String token;
+  token.reserve(maximumLength);
+  for (size_t index = 0; index < value.length() && token.length() < maximumLength; index++) {
+    const char character = value[index];
+    const bool alphaNumeric = (character >= 'a' && character <= 'z') ||
+                              (character >= 'A' && character <= 'Z') ||
+                              (character >= '0' && character <= '9');
+    if (alphaNumeric) {
+      token += character;
+    }
+    else if (token.length() && token[token.length() - 1] != '_') {
+      token += '_';
+    }
+  }
+  while (token.endsWith("_"))
+    token.remove(token.length() - 1);
+  return token.length() ? token : String(F("UnknownVendor"));
+}
+
 bool openGattServiceLog(File& logFile, String& logPath) {
-  if (!sd_obj.supported || target.advertisedServices[0] == '\0')
+  if (!sd_obj.supported)
     return false;
 
+  String addressToken = targetAddress();
+  addressToken.toUpperCase();
+  addressToken.replace(':', '-');
+  const String basePath = String(F("/BLE_GATT_ADV_")) +
+                          filenameToken(targetVendorName(), 28) + "_" + addressToken;
   for (uint16_t index = 0; index < 10000; index++) {
-    logPath = String(F("/ble_gatt_services_")) + index + F(".log");
+    logPath = basePath;
+    if (index)
+      logPath += String("_") + index;
+    logPath += F(".log");
     if (SD.exists(logPath))
       continue;
     logFile = SD.open(logPath, FILE_WRITE);
@@ -137,13 +244,15 @@ bool openGattServiceLog(File& logFile, String& logPath) {
 
 void writeGattLogHeader(File& logFile) {
   const char* company = target.hasCompanyId ? BLECompanyIdentifiers::lookup(target.companyId) : nullptr;
-  logFile.println(F("# ESP32 Marauder BLE GATT service enumeration"));
+  logFile.println(F("# ESP32 Marauder BLE advertisement and GATT enumeration"));
   logFile.print(F("firmware="));
   logFile.println(MARAUDER_VERSION);
   logFile.print(F("uptime_ms="));
   logFile.println(millis());
   logFile.print(F("target_name="));
   logFile.println(singleLineText(target.name));
+  logFile.print(F("target_vendor="));
+  logFile.println(targetVendorName());
   logFile.print(F("target_address="));
   logFile.println(targetAddress());
   logFile.print(F("address_type="));
@@ -463,34 +572,24 @@ bool downPressed() {
 
 void waitForReturn();
 
-bool addGattDisplayItem(std::vector<GattDisplayItem>& results,
+bool addGattDisplayItem(GattDisplayResults& results,
                         bool service,
                         const std::string& uuid,
                         const std::string& parentServiceUuid,
                         uint8_t properties,
                         bool& limited) {
-  if (results.size() >= GATT_RESULTS_MAX_ITEMS) {
-    limited = true;
+  if (limited)
     return false;
-  }
-
-  size_t allocationHeadroom = sizeof(GattDisplayItem) * 4;
-  if (results.size() == results.capacity()) {
-    const size_t nextCapacity = results.capacity() ? results.capacity() * 2 : 1;
-    allocationHeadroom += nextCapacity * sizeof(GattDisplayItem);
-  }
-  if (ESP.getFreeHeap() < GATT_RESULTS_MINIMUM_FREE_HEAP + allocationHeadroom) {
-    limited = true;
-    return false;
-  }
 
   GattDisplayItem item{};
   item.service = service;
   item.properties = properties;
   snprintf(item.uuid, sizeof(item.uuid), "%s", uuid.c_str());
   snprintf(item.parentServiceUuid, sizeof(item.parentServiceUuid), "%s", parentServiceUuid.c_str());
-  results.push_back(item);
-  return true;
+  if (results.append(item))
+    return true;
+  limited = true;
+  return false;
 }
 
 #ifdef HAS_SCREEN
@@ -505,11 +604,13 @@ void drawUuidLines(const char* uuid, int16_t y) {
   }
 }
 
-void drawGattResult(const std::vector<GattDisplayItem>& results,
+void drawGattResult(const GattDisplayResults& results,
                     size_t index,
                     uint16_t serviceCount,
                     uint16_t characteristicCount,
-                    bool limited) {
+                    bool limited,
+                    size_t overallPage = 0,
+                    size_t overallPageCount = 0) {
   const GattDisplayItem& item = results[index];
   display_obj.clearScreen();
   display_obj.tft.setTextWrap(false, false);
@@ -520,7 +621,15 @@ void drawGattResult(const std::vector<GattDisplayItem>& results,
                          static_cast<unsigned>(results.size()), limited ? "*" : "");
   display_obj.tft.setTextColor(TFT_LIGHTGREY, TFT_BLACK);
   display_obj.tft.setCursor(3, 13);
-  display_obj.tft.printf("Services:%u  Chars:%u", serviceCount, characteristicCount);
+  if (overallPageCount) {
+    display_obj.tft.printf("Page %u/%u S:%u C:%u",
+                           static_cast<unsigned>(overallPage + 1),
+                           static_cast<unsigned>(overallPageCount),
+                           serviceCount, characteristicCount);
+  }
+  else {
+    display_obj.tft.printf("Services:%u  Chars:%u", serviceCount, characteristicCount);
+  }
 
   display_obj.tft.setTextColor(item.service ? TFT_GREEN : TFT_YELLOW, TFT_BLACK);
   display_obj.tft.setCursor(3, 27);
@@ -551,7 +660,7 @@ void drawGattResult(const std::vector<GattDisplayItem>& results,
 }
 #endif
 
-void showGattResults(const std::vector<GattDisplayItem>& results,
+void showGattResults(const GattDisplayResults& results,
                      uint16_t serviceCount,
                      uint16_t characteristicCount,
                      bool limited) {
@@ -588,6 +697,235 @@ void showGattResults(const std::vector<GattDisplayItem>& results,
 #endif
 #else
   (void)limited;
+  delay(100);
+#endif
+}
+
+constexpr size_t INFO_PAGE_CHARACTERS = 180;
+
+size_t pagedTextPageCount(const String& text) {
+  return max(static_cast<size_t>(1),
+             (text.length() + INFO_PAGE_CHARACTERS - 1) / INFO_PAGE_CHARACTERS);
+}
+
+#ifdef HAS_SCREEN
+void drawCombinedPageFrame(const char* title, size_t page, size_t pageCount) {
+  display_obj.clearScreen();
+  display_obj.tft.setTextWrap(false, false);
+  display_obj.tft.setTextSize(1);
+  display_obj.tft.setTextColor(TFT_CYAN, TFT_BLACK);
+  display_obj.tft.setCursor(3, 3);
+  display_obj.tft.println(title);
+  display_obj.tft.setTextColor(TFT_LIGHTGREY, TFT_BLACK);
+  display_obj.tft.setCursor(3, 13);
+  display_obj.tft.printf("Page %u/%u", static_cast<unsigned>(page + 1),
+                         static_cast<unsigned>(pageCount));
+  display_obj.tft.setCursor(3, 116);
+  display_obj.tft.println("Up/Down  Center exit");
+}
+
+void drawWrappedText(const String& text, size_t offset, int16_t y,
+                     uint8_t maximumLines, uint16_t color = TFT_WHITE) {
+  display_obj.tft.setTextColor(color, TFT_BLACK);
+  for (uint8_t line = 0; line < maximumLines && offset < text.length(); line++) {
+    const size_t remaining = text.length() - offset;
+    const size_t count = min(static_cast<size_t>(20), remaining);
+    display_obj.tft.setCursor(3, y + line * 10);
+    display_obj.tft.println(text.substring(offset, offset + count));
+    offset += count;
+  }
+}
+
+void drawCombinedSummaryPage(size_t page,
+                             size_t summaryPageCount,
+                             size_t totalPageCount,
+                             uint16_t serviceCount,
+                             uint16_t characteristicCount,
+                             bool resultsLimited,
+                             const String& outcome,
+                             const String& logStatus) {
+  const String services = target.advertisedServices[0]
+                            ? String(target.advertisedServices)
+                            : String(F("None advertised"));
+  const size_t servicePageCount = pagedTextPageCount(services);
+  const size_t advertisementPage = 2 + servicePageCount;
+  const size_t scanResponsePage = advertisementPage + 1;
+  const size_t gattSummaryPage = scanResponsePage + 1;
+
+  if (page == 0) {
+    drawCombinedPageFrame("BLE Target", page, totalPageCount);
+    display_obj.tft.setTextColor(TFT_GREEN, TFT_BLACK);
+    display_obj.tft.setCursor(3, 25);
+    display_obj.tft.println("VENDOR");
+    drawWrappedText(targetVendorName(), 0, 35, 3);
+    display_obj.tft.setTextColor(TFT_GREEN, TFT_BLACK);
+    display_obj.tft.setCursor(3, 65);
+    display_obj.tft.println("MAC");
+    drawWrappedText(targetAddress(), 0, 75, 1);
+    display_obj.tft.setTextColor(TFT_GREEN, TFT_BLACK);
+    display_obj.tft.setCursor(3, 87);
+    display_obj.tft.println("NAME");
+    drawWrappedText(String(target.name).length() ? String(target.name) : String(F("Unnamed")),
+                    0, 97, 2);
+    return;
+  }
+
+  if (page == 1) {
+    drawCombinedPageFrame("Advertisement", page, totalPageCount);
+    display_obj.tft.setTextColor(TFT_WHITE, TFT_BLACK);
+    display_obj.tft.setCursor(3, 25);
+    display_obj.tft.printf("Type: %s", addressTypeName(target.addressType));
+    display_obj.tft.setCursor(3, 35);
+    display_obj.tft.printf("Connectable: %s", target.connectable ? "yes" : "no");
+    display_obj.tft.setCursor(3, 45);
+    display_obj.tft.printf("Scannable: %s", target.scannable ? "yes" : "no");
+    display_obj.tft.setCursor(3, 55);
+    if (target.hasCompanyId)
+      display_obj.tft.printf("Company ID: 0x%04X", target.companyId);
+    else
+      display_obj.tft.print("Company ID: none");
+    display_obj.tft.setCursor(3, 65);
+    if (target.hasAppearance)
+      display_obj.tft.printf("Appearance: 0x%04X", target.appearance);
+    else
+      display_obj.tft.print("Appearance: none");
+    display_obj.tft.setCursor(3, 75);
+    display_obj.tft.printf("Adv bytes: %u", target.advertisementLength);
+    display_obj.tft.setCursor(3, 85);
+    display_obj.tft.printf("Scan rsp bytes: %u", target.scanResponseLength);
+    display_obj.tft.setCursor(3, 95);
+    display_obj.tft.printf("Truncated: %s", target.advertisementTruncated ? "yes" : "no");
+    return;
+  }
+
+  if (page < advertisementPage) {
+    drawCombinedPageFrame("Advertised UUIDs", page, totalPageCount);
+    const size_t servicesPage = page - 2;
+    drawWrappedText(services, servicesPage * INFO_PAGE_CHARACTERS, 25, 9);
+    return;
+  }
+
+  if (page == advertisementPage) {
+    drawCombinedPageFrame("Advertisement Data", page, totalPageCount);
+    const String data = target.advertisementLength
+                          ? bytesAsHex(target.advertisementData, target.advertisementLength)
+                          : String(F("None"));
+    drawWrappedText(data, 0, 25, 9);
+    return;
+  }
+
+  if (page == scanResponsePage) {
+    drawCombinedPageFrame("Scan Response Data", page, totalPageCount);
+    const String data = target.scanResponseLength
+                          ? bytesAsHex(target.scanResponseData, target.scanResponseLength)
+                          : String(F("None"));
+    drawWrappedText(data, 0, 25, 9);
+    return;
+  }
+
+  if (page == gattSummaryPage && page < summaryPageCount) {
+    drawCombinedPageFrame("GATT Summary", page, totalPageCount);
+    display_obj.tft.setTextColor(TFT_WHITE, TFT_BLACK);
+    display_obj.tft.setCursor(3, 25);
+    display_obj.tft.printf("Services: %u", serviceCount);
+    display_obj.tft.setCursor(3, 35);
+    display_obj.tft.printf("Characteristics: %u", characteristicCount);
+    display_obj.tft.setCursor(3, 45);
+    display_obj.tft.printf("GATT pages: %u%s",
+                           static_cast<unsigned>(totalPageCount - summaryPageCount),
+                           resultsLimited ? " partial" : "");
+    display_obj.tft.setTextColor(TFT_GREEN, TFT_BLACK);
+    display_obj.tft.setCursor(3, 57);
+    display_obj.tft.println("RESULT");
+    drawWrappedText(outcome, 0, 67, 2);
+    display_obj.tft.setTextColor(TFT_GREEN, TFT_BLACK);
+    display_obj.tft.setCursor(3, 89);
+    display_obj.tft.println("LOG");
+    drawWrappedText(logStatus, 0, 99, 1);
+  }
+}
+#endif
+
+void showCombinedResults(const GattDisplayResults& results,
+                         uint16_t serviceCount,
+                         uint16_t characteristicCount,
+                         bool resultsLimited,
+                         const String& outcome,
+                         const String& logStatus) {
+#ifdef HAS_SCREEN
+  const String services = target.advertisedServices[0]
+                            ? String(target.advertisedServices)
+                            : String(F("None advertised"));
+  const size_t summaryPageCount = 5 + pagedTextPageCount(services);
+  const size_t totalPageCount = summaryPageCount + results.size();
+  size_t page = 0;
+
+  auto drawPage = [&]() {
+    if (page < summaryPageCount) {
+      drawCombinedSummaryPage(page, summaryPageCount, totalPageCount,
+                              serviceCount, characteristicCount,
+                              resultsLimited, outcome, logStatus);
+    }
+    else {
+      const size_t resultIndex = page - summaryPageCount;
+      drawGattResult(results, resultIndex, serviceCount, characteristicCount,
+                     resultsLimited, page, totalPageCount);
+    }
+  };
+
+  releaseNavigationButtons();
+  drawPage();
+#if defined(HAS_BUTTONS) && (C_BTN >= 0)
+  uint8_t repeatDirection = 0;
+  uint32_t repeatAt = 0;
+  while (true) {
+    if (centerPressed())
+      break;
+
+    bool navigateUp = upPressed();
+    bool navigateDown = downPressed();
+#if (U_BTN >= 0) && (D_BTN >= 0)
+    const bool upDown = u_btn.getPullup() ? digitalRead(u_btn.getPin()) == LOW
+                                         : digitalRead(u_btn.getPin()) == HIGH;
+    const bool downDown = d_btn.getPullup() ? digitalRead(d_btn.getPin()) == LOW
+                                           : digitalRead(d_btn.getPin()) == HIGH;
+    const uint8_t currentDirection = upDown == downDown ? 0 : (upDown ? 1 : 2);
+    const uint32_t now = millis();
+    if (!currentDirection) {
+      repeatDirection = 0;
+    }
+    else if (currentDirection != repeatDirection) {
+      repeatDirection = currentDirection;
+      repeatAt = now + GATT_PAGE_REPEAT_DELAY_MS;
+    }
+    else if (static_cast<int32_t>(now - repeatAt) >= 0) {
+      navigateUp = currentDirection == 1;
+      navigateDown = currentDirection == 2;
+      repeatAt = now + GATT_PAGE_REPEAT_INTERVAL_MS;
+    }
+#endif
+
+    if (navigateUp) {
+      page = page == 0 ? totalPageCount - 1 : page - 1;
+      drawPage();
+    }
+    else if (navigateDown) {
+      page = (page + 1) % totalPageCount;
+      drawPage();
+    }
+    delay(20);
+  }
+  releaseNavigationButtons();
+#else
+  delay(3000);
+#endif
+#else
+  (void)results;
+  (void)serviceCount;
+  (void)characteristicCount;
+  (void)resultsLimited;
+  (void)outcome;
+  (void)logStatus;
   delay(100);
 #endif
 }
@@ -729,167 +1067,186 @@ void showAdvertisedInfo() {
 
 void inspectTarget() {
   String error;
-  if (!targetReady(error, true)) {
-    showStatus("BLE GATT Services", error);
+  if (!targetReady(error, false)) {
+    showStatus("GATT + Advertised", error);
     waitForReturn();
     return;
   }
+
+  const char* company = target.hasCompanyId ? BLECompanyIdentifiers::lookup(target.companyId) : nullptr;
+  Serial.println(F("[BLE GATT + Advertisement Enumeration]"));
+  Serial.println(String("  vendor: ") + targetVendorName());
+  Serial.println(String("  name: ") + target.name);
+  Serial.println(String("  address: ") + targetAddress());
+  Serial.println(String("  address type: ") + addressTypeName(target.addressType));
+  Serial.println(String("  connectable: ") + (target.connectable ? "yes" : "no"));
+  Serial.println(String("  scannable: ") + (target.scannable ? "yes" : "no"));
+  if (target.hasCompanyId) {
+    Serial.printf("  company ID: 0x%04X\n", target.companyId);
+    Serial.println(String("  company: ") + (company ? company : "unassigned"));
+  }
+  if (target.hasAppearance)
+    Serial.printf("  appearance: 0x%04X\n", target.appearance);
+  Serial.println(String("  advertised service UUIDs: ") +
+                 (target.advertisedServices[0] ? target.advertisedServices : "none"));
+  Serial.println(String("  advertisement data: ") +
+                 bytesAsHex(target.advertisementData, target.advertisementLength));
+  Serial.println(String("  scan response data: ") +
+                 bytesAsHex(target.scanResponseData, target.scanResponseLength));
+  if (target.advertisementTruncated)
+    Serial.println(F("  warning: extended advertisement was truncated to the legacy 31+31 byte snapshot"));
 
   releaseCenterButton();
-
-#ifdef HAS_SD
-  File gattLog;
-  String gattLogPath;
-  String logStatus;
-  bool gattLogSaved = false;
-  if (target.advertisedServices[0] != '\0') {
-    if (openGattServiceLog(gattLog, gattLogPath)) {
-      writeGattLogHeader(gattLog);
-      logStatus = String(F("SD log: ")) + gattLogPath;
-      Serial.println(String(F("[GATT] Saving complete enumeration to ")) + gattLogPath);
-    }
-    else {
-      logStatus = sd_obj.supported ? F("SD log create failed") : F("SD card unavailable");
-      Serial.println(String(F("[GATT] ")) + logStatus);
-    }
-  }
-  else {
-    Serial.println(F("[GATT] Target did not advertise service UUIDs; automatic SD log not created"));
-  }
-
-  auto finishGattLog = [&](const String& outcome) {
-    if (!gattLog)
-      return;
-    gattLog.println();
-    gattLog.print(F("result="));
-    gattLog.println(outcome);
-    gattLog.flush();
-    gattLog.close();
-    gattLogSaved = true;
-    Serial.println(String(F("[GATT] SD log saved: ")) + gattLogPath);
-  };
-#endif
-
-  showStatus("BLE GATT Services", "Connecting...", selectedTargetLabel()
-#ifdef HAS_SD
-             , logStatus
-#endif
-  );
-  NimBLEDevice::init("Marauder-Discovery");
-  NimBLEDevice::setSecurityAuth(false, false, false);
-  NimBLEClient* client = NimBLEDevice::createClient();
-  if (!client) {
-#ifdef HAS_SD
-    finishGattLog("error: cannot create BLE client");
-#endif
-    showStatus("BLE GATT Services", "Cannot create BLE client");
-    waitForReturn();
-    return;
-  }
-  client->setConnectTimeout(15000);
-  if (!client->connect(NimBLEAddress(target.mac, target.addressType), true, false, true)) {
-    error = String("Connect failed: ") + client->getLastError();
-    closeBLEClient(client);
-#ifdef HAS_SD
-    finishGattLog(String(F("error: ")) + error);
-#endif
-    showStatus("BLE GATT Services", error);
-    waitForReturn();
-    return;
-  }
-
-#ifdef HAS_SD
-  if (gattLog)
-    gattLog.println(F("connection=connected"));
-#endif
 
   uint16_t serviceCount = 0;
   uint16_t characteristicCount = 0;
   bool resultsLimited = false;
   bool enumerationStopped = false;
-  std::vector<GattDisplayItem> displayResults;
-  displayResults.reserve(16);
-  const auto& services = client->getServices(true);
-  for (NimBLERemoteService* service : services) {
-    if (!service)
-      continue;
-    if (centerPressed()) {
-      enumerationStopped = true;
-      break;
-    }
-    serviceCount++;
-    const std::string serviceUuid = service->getUUID().toString();
-    Serial.printf("[GATT] Service %s\n", serviceUuid.c_str());
+  GattDisplayResults displayResults;
+  String outcome;
+  String logStatus = F("SD card unavailable");
+
 #ifdef HAS_SD
-    if (gattLog) {
-      gattLog.print(F("Service "));
-      gattLog.println(serviceUuid.c_str());
-    }
-#endif
-    addGattDisplayItem(displayResults, true, serviceUuid, "", 0, resultsLimited);
-    const auto& characteristics = service->getCharacteristics(true);
-    for (NimBLERemoteCharacteristic* characteristic : characteristics) {
-      if (!characteristic)
-        continue;
-      if (centerPressed()) {
-        enumerationStopped = true;
-        break;
-      }
-      characteristicCount++;
-      const std::string characteristicUuid = characteristic->getUUID().toString();
-      uint8_t properties = 0;
-      if (characteristic->canRead()) properties |= GATT_PROPERTY_READ;
-      if (characteristic->canWrite()) properties |= GATT_PROPERTY_WRITE;
-      if (characteristic->canNotify()) properties |= GATT_PROPERTY_NOTIFY;
-      if (characteristic->canIndicate()) properties |= GATT_PROPERTY_INDICATE;
-      Serial.printf("  Characteristic %s [%c%c%c%c]\n",
-                    characteristicUuid.c_str(),
-                    properties & GATT_PROPERTY_READ ? 'R' : '-',
-                    properties & GATT_PROPERTY_WRITE ? 'W' : '-',
-                    properties & GATT_PROPERTY_NOTIFY ? 'N' : '-',
-                    properties & GATT_PROPERTY_INDICATE ? 'I' : '-');
-#ifdef HAS_SD
-      if (gattLog) {
-        gattLog.print(F("  Characteristic "));
-        gattLog.print(characteristicUuid.c_str());
-        gattLog.printf(" [%c%c%c%c]\n",
-                       properties & GATT_PROPERTY_READ ? 'R' : '-',
-                       properties & GATT_PROPERTY_WRITE ? 'W' : '-',
-                       properties & GATT_PROPERTY_NOTIFY ? 'N' : '-',
-                       properties & GATT_PROPERTY_INDICATE ? 'I' : '-');
-      }
-#endif
-      addGattDisplayItem(displayResults, false, characteristicUuid, serviceUuid,
-                         properties, resultsLimited);
-    }
-    if (enumerationStopped)
-      break;
+  File gattLog;
+  String gattLogPath;
+  bool gattLogSaved = false;
+  if (openGattServiceLog(gattLog, gattLogPath)) {
+    writeGattLogHeader(gattLog);
+    logStatus = gattLogPath;
+    Serial.println(String(F("[BLE Enumeration] Saving combined results to ")) + gattLogPath);
   }
-  closeBLEClient(client);
-  Serial.println(String("[GATT] Display results: ") + displayResults.size() +
-                 (resultsLimited ? " (limited)" : ""));
-  if (enumerationStopped)
-    Serial.println(F("[GATT] Enumeration stopped by user"));
-#ifdef HAS_SD
-  if (gattLog) {
+  else {
+    logStatus = sd_obj.supported ? F("SD log create failed") : F("SD card unavailable");
+    Serial.println(String(F("[BLE Enumeration] ")) + logStatus);
+  }
+
+  auto finishGattLog = [&]() {
+    if (!gattLog)
+      return;
     gattLog.println();
     gattLog.print(F("services_discovered="));
     gattLog.println(serviceCount);
     gattLog.print(F("characteristics_discovered="));
     gattLog.println(characteristicCount);
-    gattLog.print(F("screen_results_limited="));
-    gattLog.println(resultsLimited ? F("yes") : F("no"));
-    finishGattLog(enumerationStopped ? F("stopped by user") : F("complete"));
-  }
+    gattLog.print(F("screen_result_pages="));
+    gattLog.println(displayResults.size());
+    gattLog.print(F("screen_results_complete="));
+    gattLog.println(resultsLimited ? F("no") : F("yes"));
+    gattLog.print(F("result="));
+    gattLog.println(outcome);
+    gattLog.flush();
+    gattLog.close();
+    gattLogSaved = true;
+    Serial.println(String(F("[BLE Enumeration] Combined log saved: ")) + gattLogPath);
+  };
 #endif
-  showGattResults(displayResults, serviceCount, characteristicCount, resultsLimited);
+
+  if (!target.connectable) {
+    outcome = F("GATT skipped: not connectable");
+    Serial.println(String(F("[GATT] ")) + outcome);
+  }
+  else {
+    showStatus("GATT + Advertised", "Connecting...", selectedTargetLabel()
+#ifdef HAS_SD
+               , logStatus
+#endif
+    );
+    NimBLEDevice::init("Marauder-Discovery");
+    NimBLEDevice::setSecurityAuth(false, false, false);
+    NimBLEClient* client = NimBLEDevice::createClient();
+    if (!client) {
+      outcome = F("error: cannot create BLE client");
+      closeBLEClient(client);
+    }
+    else {
+      client->setConnectTimeout(15000);
+      if (!client->connect(NimBLEAddress(target.mac, target.addressType), true, false, true)) {
+        outcome = String(F("connect failed: ")) + client->getLastError();
+        closeBLEClient(client);
+      }
+      else {
 
 #ifdef HAS_SD
-  if (gattLogSaved) {
-    showStatus("GATT Log Saved", gattLogPath);
-    delay(1200);
-  }
+        if (gattLog)
+          gattLog.println(F("connection=connected"));
 #endif
+
+        const auto& services = client->getServices(true);
+        for (NimBLERemoteService* service : services) {
+          if (!service)
+            continue;
+          if (centerPressed()) {
+            enumerationStopped = true;
+            break;
+          }
+          serviceCount++;
+          const std::string serviceUuid = service->getUUID().toString();
+          Serial.printf("[GATT] Service %s\n", serviceUuid.c_str());
+#ifdef HAS_SD
+          if (gattLog) {
+            gattLog.print(F("Service "));
+            gattLog.println(serviceUuid.c_str());
+          }
+#endif
+          addGattDisplayItem(displayResults, true, serviceUuid, "", 0, resultsLimited);
+          const auto& characteristics = service->getCharacteristics(true);
+          for (NimBLERemoteCharacteristic* characteristic : characteristics) {
+            if (!characteristic)
+              continue;
+            if (centerPressed()) {
+              enumerationStopped = true;
+              break;
+            }
+            characteristicCount++;
+            const std::string characteristicUuid = characteristic->getUUID().toString();
+            uint8_t properties = 0;
+            if (characteristic->canRead()) properties |= GATT_PROPERTY_READ;
+            if (characteristic->canWrite()) properties |= GATT_PROPERTY_WRITE;
+            if (characteristic->canNotify()) properties |= GATT_PROPERTY_NOTIFY;
+            if (characteristic->canIndicate()) properties |= GATT_PROPERTY_INDICATE;
+            Serial.printf("  Characteristic %s [%c%c%c%c]\n",
+                          characteristicUuid.c_str(),
+                          properties & GATT_PROPERTY_READ ? 'R' : '-',
+                          properties & GATT_PROPERTY_WRITE ? 'W' : '-',
+                          properties & GATT_PROPERTY_NOTIFY ? 'N' : '-',
+                          properties & GATT_PROPERTY_INDICATE ? 'I' : '-');
+#ifdef HAS_SD
+            if (gattLog) {
+              gattLog.print(F("  Characteristic "));
+              gattLog.print(characteristicUuid.c_str());
+              gattLog.printf(" [%c%c%c%c]\n",
+                             properties & GATT_PROPERTY_READ ? 'R' : '-',
+                             properties & GATT_PROPERTY_WRITE ? 'W' : '-',
+                             properties & GATT_PROPERTY_NOTIFY ? 'N' : '-',
+                             properties & GATT_PROPERTY_INDICATE ? 'I' : '-');
+            }
+#endif
+            addGattDisplayItem(displayResults, false, characteristicUuid, serviceUuid,
+                               properties, resultsLimited);
+          }
+          if (enumerationStopped)
+            break;
+        }
+        closeBLEClient(client);
+        outcome = enumerationStopped ? F("stopped by user") : F("complete");
+      }
+    }
+  }
+
+  Serial.println(String("[GATT] Display results: ") + displayResults.size() +
+                 (resultsLimited ? " (limited)" : ""));
+  if (enumerationStopped)
+    Serial.println(F("[GATT] Enumeration stopped by user"));
+  if (outcome.startsWith("error") || outcome.startsWith("connect failed"))
+    Serial.println(String(F("[GATT] ")) + outcome);
+
+#ifdef HAS_SD
+  finishGattLog();
+  if (gattLogSaved)
+    logStatus = gattLogPath;
+#endif
+  showCombinedResults(displayResults, serviceCount, characteristicCount,
+                      resultsLimited, outcome, logStatus);
 }
 
 void runDeviceSpoof() {

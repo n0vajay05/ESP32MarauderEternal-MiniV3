@@ -32,8 +32,9 @@ SOFTWARE.
 
 ## opendroneid-core-c
 
-The compact Open Drone ID decoder in `esp32_marauder/DroneRemoteID.cpp` and
-message encoder in `esp32_marauder/DroneRemoteIDSpoofer.cpp` are derived from
+The compact Open Drone ID decoder in
+`firmware/MarauderEternal/DroneRemoteID.cpp` and message encoder in
+`firmware/MarauderEternal/DroneRemoteIDSpoofer.cpp` are derived from
 [opendroneid-core-c](https://github.com/opendroneid/opendroneid-core-c) and
 modifications made by nyanBOX. The upstream library is licensed under the
 Apache License, Version 2.0. A copy of the license is available at
