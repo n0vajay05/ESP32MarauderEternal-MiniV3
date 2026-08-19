@@ -27,6 +27,12 @@ Marauder code base by JustCallMeKoKo and modified for the Marauder Mini V3 only.
 The source contains a compile-time guard that rejects non-ESP32-C5 board
 targets. `MARAUDER_MINI_V3` is also fixed by the project configuration.
 
+## Screenshots
+<img width="128" height="128" alt="image" src="https://github.com/user-attachments/assets/f176da9a-eafb-42ac-afda-aac6455f8962" />
+<img width="128" height="128" alt="image" src="https://github.com/user-attachments/assets/5ef02b66-e307-4d84-ac74-c161e486a6cf" /> 
+<img width="128" height="128" alt="image" src="https://github.com/user-attachments/assets/2d50998b-a543-4501-abea-a0063ae3aaaa" />
+<img width="128" height="128" alt="image" src="https://github.com/user-attachments/assets/70f1b90e-86e3-4518-b08f-e84426144d9a" />
+
 ## Flash the existing device
 
 The normal flasher updates only the application partition at `0x10000`, which
