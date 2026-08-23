@@ -7,6 +7,7 @@
 
 #include "Display.h"
 #include "GameFrameBuffer.h"
+#include "GameInput.h"
 #include "Switches.h"
 
 extern Display display_obj;
@@ -78,11 +79,7 @@ bool buttonDown(Switches& button) {
 }
 
 void releaseButton(Switches& button) {
-  while (buttonDown(button)) {
-    button.justPressed();
-    delay(5);
-  }
-  button.justPressed();
+  GameInput::waitForRelease(button);
 }
 
 void releaseControls() {

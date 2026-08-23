@@ -15,7 +15,7 @@ fi
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
 RELEASE_DIR="${PROJECT_DIR}/release"
-APP_IMAGE="${RELEASE_DIR}/Marauder_Eternal_1.14.3_MiniV3_ESP32-C5.app.bin"
+APP_IMAGE="${RELEASE_DIR}/Marauder_Eternal_1.14.4_MiniV3_ESP32-C5.app.bin"
 
 if [[ -n "${ESPTOOL_BIN:-}" ]]; then
   ESPTOOL="${ESPTOOL_BIN}"

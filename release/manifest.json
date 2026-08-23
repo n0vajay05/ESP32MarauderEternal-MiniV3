@@ -1,6 +1,6 @@
 {
   "product": "ESP32 Marauder Eternal",
-  "version": "1.14.3",
+  "version": "1.14.4",
   "hardware": "Marauder Mini V3",
   "chip": "ESP32-C5",
   "flash_size": "8MB",
@@ -8,12 +8,12 @@
   "fqbn": "esp32:esp32:esp32c5:FlashSize=8M,PartitionScheme=custom,PSRAM=enabled",
   "esp32_arduino_core": "3.3.4",
   "source_base_commit": "de42658f8c77df2280b3d202aa2393d77b70f31e",
-  "build_date": "2026-08-19",
+  "build_date": "2026-08-23",
   "full_device_image": {
-    "file": "Marauder_Eternal_1.14.3_MiniV3_ESP32-C5.bin",
+    "file": "Marauder_Eternal_1.14.4_MiniV3_ESP32-C5.bin",
     "offset": "0x0",
     "bytes": 8388608,
-    "sha256": "4933f510e8b7bb6d71ece62285606e30733621bb245f2b32ea478c469a80dec1",
+    "sha256": "bdfd83eddf63c0f14368384a944a66fba077ed6dd8fc19449ee6be5ae7e68300",
     "contains": [
       "bootloader@0x2000",
       "partitions@0x8000",
@@ -23,28 +23,28 @@
   },
   "images": [
     {
-      "file": "Marauder_Eternal_1.14.3_MiniV3_ESP32-C5.bootloader.bin",
+      "file": "Marauder_Eternal_1.14.4_MiniV3_ESP32-C5.bootloader.bin",
       "offset": "0x2000",
       "bytes": 20784,
       "sha256": "f0cc3970dbf6001eb398e589244047f0731acbc0ded1ccfa952cd7559c083b13"
     },
     {
-      "file": "Marauder_Eternal_1.14.3_MiniV3_ESP32-C5.partitions.bin",
+      "file": "Marauder_Eternal_1.14.4_MiniV3_ESP32-C5.partitions.bin",
       "offset": "0x8000",
       "bytes": 3072,
       "sha256": "40e6dee4da2a918eed994db5ed0fe779271485d6c01676a37e786acdb27d1413"
     },
     {
-      "file": "Marauder_Eternal_1.14.3_MiniV3_ESP32-C5.boot_app0.bin",
+      "file": "Marauder_Eternal_1.14.4_MiniV3_ESP32-C5.boot_app0.bin",
       "offset": "0xe000",
       "bytes": 8192,
       "sha256": "f94c5d786a7a8fab06ac5d10e33bf37711a6697636dc037559ea19cc410a17f0"
     },
     {
-      "file": "Marauder_Eternal_1.14.3_MiniV3_ESP32-C5.app.bin",
+      "file": "Marauder_Eternal_1.14.4_MiniV3_ESP32-C5.app.bin",
       "offset": "0x10000",
-      "bytes": 2377648,
-      "sha256": "35d7d825c52851f0639c11b9dc261f307fa4b1ab94118755bb9fe8b71a1f3e1b"
+      "bytes": 2376160,
+      "sha256": "744b15cbabc3b881f24983db26be9b0b970158397fb3aaec9b5345533fd9de18"
     }
   ]
 }

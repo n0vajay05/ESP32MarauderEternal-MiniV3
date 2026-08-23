@@ -3231,6 +3231,9 @@ void MenuFunctions::RunSetup()
       this->changeMenu(&wifiAPMenu, true);
     });
 
+    // Keep target selection immediately below Back in WiFi General.
+    wifiGeneralMenu.list->add(1, wifiGeneralMenu.list->pop());
+
     this->addNodes(&wifiGeneralMenu, "View AP Info", TFTCYAN, KEYBOARD_ICO, [this](){
       wifiAPMenu.parentMenu = &wifiGeneralMenu;
       
@@ -3335,6 +3338,8 @@ void MenuFunctions::RunSetup()
       }
       this->changeMenu(&wifiAPMenu, true);
     });
+
+    wifiGeneralMenu.list->add(2, wifiGeneralMenu.list->pop());
 
     this->addNodes(&wifiGeneralMenu, "Join WiFi", TFTWHITE, KEYBOARD_ICO, [this](){
 

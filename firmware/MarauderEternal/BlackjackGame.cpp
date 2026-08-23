@@ -8,6 +8,7 @@
 
 #include "Display.h"
 #include "GameFrameBuffer.h"
+#include "GameInput.h"
 #include "Switches.h"
 
 extern Display display_obj;
@@ -52,8 +53,6 @@ uint16_t losses = 0;
 uint16_t ties = 0;
 const char* resultMessage = "";
 int8_t resultOutcome = 0;
-bool centerWasDown = false;
-uint32_t centerPressedAt = 0;
 GameFrameBuffer* frameBuffer = nullptr;
 
 TFT_eSprite& canvas() {
@@ -70,11 +69,7 @@ bool buttonDown(Switches& button) {
 }
 
 void releaseButton(Switches& button) {
-  while (buttonDown(button)) {
-    button.justPressed();
-    delay(5);
-  }
-  button.justPressed();
+  GameInput::waitForRelease(button);
 }
 
 void releaseControls() {
@@ -332,25 +327,6 @@ void playerHit() {
   drawGame();
 }
 
-enum class CenterEvent : uint8_t {
-  None,
-  Tap,
-  Hold,
-};
-
-CenterEvent pollCenter(uint32_t now) {
-  const bool down = buttonDown(c_btn);
-  CenterEvent event = CenterEvent::None;
-  if (down && !centerWasDown)
-    centerPressedAt = now;
-  else if (down && centerWasDown && now - centerPressedAt >= 1000)
-    event = CenterEvent::Hold;
-  else if (!down && centerWasDown)
-    event = CenterEvent::Tap;
-  centerWasDown = down;
-  return event;
-}
-
 }  // namespace
 
 void run() {
@@ -368,14 +344,16 @@ void run() {
   wins = 0;
   losses = 0;
   ties = 0;
-  centerWasDown = false;
+  GameInput::TapHoldButton centerButton(c_btn);
+  centerButton.reset();
   newHand();
 
   while (true) {
-    const CenterEvent centerEvent = pollCenter(millis());
-    if (centerEvent == CenterEvent::Hold)
+    const GameInput::CenterEvent centerEvent = centerButton.poll(millis());
+    if (centerEvent == GameInput::CenterEvent::Hold)
       break;
-    if (centerEvent == CenterEvent::Tap && roundState == RoundState::Result)
+    if (centerEvent == GameInput::CenterEvent::Tap &&
+        roundState == RoundState::Result)
       newHand();
 
     if (roundState == RoundState::PlayerTurn) {

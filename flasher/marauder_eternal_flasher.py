@@ -25,10 +25,10 @@ except ImportError:  # Shown as a useful GUI error instead of failing at import.
 
 
 APP_NAME = "Marauder Eternal Flasher"
-APP_VERSION = "1.1.0"
-FIRMWARE_VERSION = "1.14.3"
-INCLUDED_FILENAME = "Marauder_Eternal_1.14.3_MiniV3_ESP32-C5.bin"
-INCLUDED_SHA256 = "4933f510e8b7bb6d71ece62285606e30733621bb245f2b32ea478c469a80dec1"
+APP_VERSION = "1.1.1"
+FIRMWARE_VERSION = "1.14.4"
+INCLUDED_FILENAME = "Marauder_Eternal_1.14.4_MiniV3_ESP32-C5.bin"
+INCLUDED_SHA256 = "bdfd83eddf63c0f14368384a944a66fba077ed6dd8fc19449ee6be5ae7e68300"
 FLASH_SIZE = 8 * 1024 * 1024
 APPLICATION_OFFSET = 0x10000
 APPLICATION_LIMIT = 0x3D0000 - APPLICATION_OFFSET
@@ -347,7 +347,7 @@ class FlasherApp:
         self.firmware = inspect_firmware(resource_path(), included=True)
 
         self.port_var = tk.StringVar()
-        self.firmware_path_var = tk.StringVar(value="Included Marauder Eternal 1.14.3")
+        self.firmware_path_var = tk.StringVar(value=f"Included Marauder Eternal {FIRMWARE_VERSION}")
         self.firmware_detail_var = tk.StringVar(value=self.firmware.detail)
         self.firmware_warning_var = tk.StringVar()
         self.status_var = tk.StringVar(value="Connect a Marauder Mini V3 to begin")
@@ -676,7 +676,7 @@ class FlasherApp:
         except Exception as error:
             messagebox.showerror(APP_NAME, str(error))
             return
-        self._select_firmware(firmware, "Included Marauder Eternal 1.14.3")
+        self._select_firmware(firmware, f"Included Marauder Eternal {FIRMWARE_VERSION}")
 
     def refresh_ports(self) -> None:
         if self.flashing:

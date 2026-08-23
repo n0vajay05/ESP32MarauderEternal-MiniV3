@@ -18,6 +18,10 @@ class GameFrameBuffer {
     sprite_.setColorDepth(16);
     ready_ = sprite_.createSprite(width, height) != nullptr;
     if (ready_) {
+      // TFT_eSPI does not initialize its inherited GFX free-font pointer in
+      // every sprite construction path. Select the built-in font explicitly
+      // before any game sends text through Print::write().
+      sprite_.setTextFont(1);
       sprite_.setTextWrap(false);
       sprite_.fillSprite(TFT_BLACK);
     }

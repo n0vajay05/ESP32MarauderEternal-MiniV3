@@ -7,7 +7,7 @@ from PyInstaller.utils.hooks import collect_data_files, collect_submodules
 
 
 project_root = Path(SPECPATH).resolve().parent
-firmware = project_root / "release" / "Marauder_Eternal_1.14.3_MiniV3_ESP32-C5.bin"
+firmware = project_root / "release" / "Marauder_Eternal_1.14.4_MiniV3_ESP32-C5.bin"
 notices = project_root / "flasher" / "THIRD_PARTY_NOTICES.md"
 
 if not firmware.is_file():

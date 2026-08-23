@@ -6,7 +6,7 @@ on:
     paths:
       - "flasher/**"
       - "scripts/build-gui-*"
-      - "release/Marauder_Eternal_1.14.3_MiniV3_ESP32-C5.bin"
+      - "release/Marauder_Eternal_1.14.4_MiniV3_ESP32-C5.bin"
       - ".github/workflows/build-flasher.yml"
 
 jobs:

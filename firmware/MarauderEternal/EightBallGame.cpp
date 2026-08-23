@@ -9,6 +9,8 @@
 #include <math.h>
 
 #include "Display.h"
+#include "GameFrameBuffer.h"
+#include "GameInput.h"
 #include "Switches.h"
 
 extern Display display_obj;
@@ -68,9 +70,7 @@ uint8_t shotPower = 3;
 uint8_t targetsRemaining = 7;
 uint16_t shots = 0;
 uint32_t nextAimStepAt = 0;
-bool centerWasDown = false;
-uint32_t centerPressedAt = 0;
-TFT_eSprite* frameSprite = nullptr;
+GameFrameBuffer* frameBuffer = nullptr;
 
 const uint16_t BALL_COLORS[BALL_COUNT] = {
     TFT_WHITE, TFT_YELLOW, TFT_BLUE, TFT_RED, TFT_PURPLE,
@@ -82,11 +82,7 @@ bool buttonDown(Switches& button) {
 }
 
 void releaseButton(Switches& button) {
-  while (buttonDown(button)) {
-    button.justPressed();
-    delay(5);
-  }
-  button.justPressed();
+  GameInput::waitForRelease(button);
 }
 
 void releaseControls() {
@@ -190,30 +186,27 @@ void composeFrame(Surface& surface) {
 }
 
 void drawFrame() {
-  if (frameSprite != nullptr) {
-    composeFrame(*frameSprite);
-    frameSprite->pushSprite(0, 0);
-  }
-  else {
-    composeFrame(display_obj.tft);
-  }
+  composeFrame(frameBuffer->canvas());
+  frameBuffer->present();
 }
 
 void drawEndScreen() {
   const bool won = gameState == GameState::Won;
   const uint16_t color = won ? TFT_GREEN : TFT_RED;
-  display_obj.tft.fillRect(9, 48, GAME_WIDTH - 18, 55, TFT_BLACK);
-  display_obj.tft.drawRect(9, 48, GAME_WIDTH - 18, 55, color);
-  display_obj.tft.setTextDatum(TC_DATUM);
-  display_obj.tft.setTextColor(color, TFT_BLACK);
-  display_obj.tft.drawString(won ? "TABLE CLEARED" : "8 BALL EARLY",
-                             GAME_WIDTH / 2, 53, 2);
-  display_obj.tft.setTextColor(TFT_WHITE, TFT_BLACK);
-  display_obj.tft.drawString(String(F("Shots ")) + shots,
-                             GAME_WIDTH / 2, 74, 1);
-  display_obj.tft.drawString("Direction: retry", GAME_WIDTH / 2, 85, 1);
-  display_obj.tft.drawString("Hold center: exit", GAME_WIDTH / 2, 94, 1);
-  display_obj.tft.setTextDatum(TL_DATUM);
+  TFT_eSprite& surface = frameBuffer->canvas();
+  surface.fillRect(9, 48, GAME_WIDTH - 18, 55, TFT_BLACK);
+  surface.drawRect(9, 48, GAME_WIDTH - 18, 55, color);
+  surface.setTextDatum(TC_DATUM);
+  surface.setTextColor(color, TFT_BLACK);
+  surface.drawString(won ? "TABLE CLEARED" : "8 BALL EARLY",
+                     GAME_WIDTH / 2, 53, 2);
+  surface.setTextColor(TFT_WHITE, TFT_BLACK);
+  surface.drawString(String(F("Shots ")) + shots,
+                     GAME_WIDTH / 2, 74, 1);
+  surface.drawString("Direction: retry", GAME_WIDTH / 2, 85, 1);
+  surface.drawString("Hold center: exit", GAME_WIDTH / 2, 94, 1);
+  surface.setTextDatum(TL_DATUM);
+  frameBuffer->present();
 }
 
 void placeBall(uint8_t index, float x, float y) {
@@ -429,25 +422,6 @@ void shoot() {
   gameState = GameState::Rolling;
 }
 
-enum class CenterEvent : uint8_t {
-  None,
-  Tap,
-  Hold,
-};
-
-CenterEvent pollCenter(uint32_t now) {
-  const bool down = buttonDown(c_btn);
-  CenterEvent event = CenterEvent::None;
-  if (down && !centerWasDown)
-    centerPressedAt = now;
-  else if (down && centerWasDown && now - centerPressedAt >= 1000)
-    event = CenterEvent::Hold;
-  else if (!down && centerWasDown)
-    event = CenterEvent::Tap;
-  centerWasDown = down;
-  return event;
-}
-
 bool retryPressed() {
   return u_btn.justPressed() || d_btn.justPressed() ||
          l_btn.justPressed() || r_btn.justPressed();
@@ -462,23 +436,24 @@ bool gameFinished() {
 void run() {
   releaseControls();
   randomSeed(micros());
-  TFT_eSprite bufferedFrame(&display_obj.tft);
-  bufferedFrame.setColorDepth(16);
-  if (bufferedFrame.createSprite(GAME_WIDTH, GAME_HEIGHT) != nullptr) {
-    bufferedFrame.setTextWrap(false);
-    frameSprite = &bufferedFrame;
+  GameFrameBuffer bufferedFrame(display_obj.tft);
+  if (!bufferedFrame.begin(GAME_WIDTH, GAME_HEIGHT)) {
+    display_obj.tft.fillScreen(TFT_BLACK);
+    display_obj.tft.setTextColor(TFT_RED, TFT_BLACK);
+    display_obj.tft.drawString("Frame buffer error", 8, 56, 1);
+    releaseControls();
+    return;
   }
-  else {
-    frameSprite = nullptr;
-  }
-  centerWasDown = false;
+  frameBuffer = &bufferedFrame;
+  GameInput::TapHoldButton centerButton(c_btn);
+  centerButton.reset();
   resetGame();
   uint32_t nextFrameAt = millis();
 
   while (true) {
     const uint32_t now = millis();
-    const CenterEvent centerEvent = pollCenter(now);
-    if (centerEvent == CenterEvent::Hold)
+    const GameInput::CenterEvent centerEvent = centerButton.poll(now);
+    if (centerEvent == GameInput::CenterEvent::Hold)
       break;
 
     if (gameFinished()) {
@@ -496,7 +471,7 @@ void run() {
       if (d_btn.justPressed() && shotPower > 1)
         shotPower--;
       adjustAim(now);
-      if (centerEvent == CenterEvent::Tap)
+      if (centerEvent == GameInput::CenterEvent::Tap)
         shoot();
     }
 
@@ -511,8 +486,7 @@ void run() {
     delay(3);
   }
 
-  frameSprite = nullptr;
-  bufferedFrame.deleteSprite();
+  frameBuffer = nullptr;
   releaseControls();
   display_obj.tft.setTextDatum(TL_DATUM);
   display_obj.tft.setTextWrap(false);
