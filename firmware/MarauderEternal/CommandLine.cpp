@@ -1,8 +1,9 @@
 #include "CommandLine.h"
 
 // Brightness functions defined in esp32_marauder.ino
-#ifndef HAS_MINI_SCREEN
+#if !defined(HAS_MINI_SCREEN) || defined(MARAUDER_MINI_V3)
   extern void brightnessCycle();
+  extern void brightnessSave(uint8_t level);
   extern uint8_t getBrightnessLevel();
 #endif
 
@@ -1217,7 +1218,7 @@ void CommandLine::runCommand(String input) {
 
     // Brightness command
     else if (cmd_args.get(0) == BRIGHTNESS_CMD) {
-      #ifndef HAS_MINI_SCREEN
+      #if !defined(HAS_MINI_SCREEN) || defined(MARAUDER_MINI_V3)
         int c_arg = this->argSearch(&cmd_args, "-c");
         int s_arg = this->argSearch(&cmd_args, "-s");
         if (c_arg != -1) {
@@ -1225,7 +1226,6 @@ void CommandLine::runCommand(String input) {
         } else if (s_arg != -1) {
           uint8_t lvl = cmd_args.get(s_arg + 1).toInt();
           if (lvl < 10) {
-            extern void brightnessSave(uint8_t level);
             brightnessSave(lvl);
             Serial.print(F("[Brightness] Set to level "));
             Serial.println(lvl);

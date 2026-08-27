@@ -185,6 +185,8 @@ class MenuFunctions
     #endif*/
     Menu wifiGeneralMenu;
     Menu wifiAPMenu;
+    Menu ssidGroupMenu;
+    Menu ssidAPMenu;
     Menu wifiIPMenu;
     Menu ssidsMenu;
     //#ifdef HAS_BT
@@ -256,6 +258,14 @@ class MenuFunctions
     void showBLETargetDetails(int index, Menu* returnMenu, bool startFoxHunt);
     void buildEvilPortalActionMenu(const String& ssid);
     void buildEvilPortalCredentialsMenu();
+    void buildSSIDGroupMenu(bool fox_hunt_mode = false,
+                            bool finder_mode = false);
+    void buildSSIDAPMenu(const String& group_name,
+                         bool fox_hunt_mode = false);
+    #ifdef MARAUDER_MINI_V3
+      void showMiniMenuError(const char* message, Menu* return_menu,
+                             uint16_t return_index);
+    #endif
     void battery(bool initial = false);
     void battery2(bool initial = false);
     const char* callSetting(const char* key);
@@ -304,7 +314,6 @@ class MenuFunctions
     #endif
 
     Menu infoMenu;
-    Menu apInfoMenu;
 
     #ifdef HAS_DIRECT_UPLOAD
       Menu uploadLogsMenu;
@@ -329,7 +338,7 @@ class MenuFunctions
     #ifdef MARAUDER_MINI_V3
       bool renderCurrentMenu(TFT_eSPI& target);
     #endif
-    #ifndef HAS_MINI_SCREEN
+    #if !defined(HAS_MINI_SCREEN) || defined(MARAUDER_MINI_V3)
       void brightnessMode();
     #endif
     void main(uint32_t currentTime);

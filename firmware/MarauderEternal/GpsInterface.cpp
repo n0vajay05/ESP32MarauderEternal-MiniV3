@@ -12,79 +12,70 @@ MicroNMEA nmea(nmeaBuffer, sizeof(nmeaBuffer));
 // and constructing another object with that symbol corrupts startup state.
 static HardwareSerial gpsSerial(GPS_SERIAL_INDEX);
 
-static const char *PCAS_SET_115200 = "$PCAS01,5*19\r\n";
-
+static const uint32_t GPS_BAUD_RATES[] = {
+    115200, 9600, 38400, 57600, 19200, 4800};
+static const uint8_t GPS_BAUD_RATE_COUNT =
+    sizeof(GPS_BAUD_RATES) / sizeof(GPS_BAUD_RATES[0]);
 static const uint32_t PROBE_MS = 1200;
+static const uint32_t RECOVERY_BAUD_DWELL_MS = 1800;
+static const uint32_t GPS_TRAFFIC_TIMEOUT_MS = 6000;
+static const uint32_t GPS_FIX_TIMEOUT_MS = 3500;
 
 void GpsInterface::begin() {
-
-  
-  gpsSerial.begin(9600, SERIAL_8N1, GPS_TX, GPS_RX);
-
-  uint32_t gps_baud = this->initGpsBaudAndForce115200();
-
-  if ((gps_baud != 9600) && (gps_baud != 38400) && (gps_baud != 115200))
-    Serial.println(F("Could not detect GPS baudrate"));
-
-  delay(1000);
-
-  MicroNMEA::sendSentence(gpsSerial, "$PSTMSETPAR,1201,0x00000042");
-  MicroNMEA::sendSentence(gpsSerial, "$PSTMSAVEPAR");
-
-  MicroNMEA::sendSentence(gpsSerial, "$PSTMSRR");
-
-  delay(1000);
-
-  if (gpsSerial.available()) {
-    this->gps_enabled = true;
-    while (gpsSerial.available()) {
-      //Fetch the character one by one
-      char c = gpsSerial.read();
-      //Serial.print(c);
-      //Pass the character to the library
-      nmea.process(c);
-    }
-  }
-  else {
-    this->gps_enabled = false;
-    Serial.println(F("GPS Not Found"));
-  }
-  
-
-  this->type_flag=GPSTYPE_NATIVE; //enforce default
-  this->disable_queue(); //init the queue, disabled, kill NULLs
-
+  this->gps_enabled = false;
+  this->good_fix = false;
+  this->gps_baud = 0;
+  this->listening_baud = 0;
+  this->last_sentence_ms = 0;
+  this->last_fix_sentence_ms = 0;
+  this->last_baud_switch_ms = 0;
+  this->recovery_baud_index = 0;
+  this->type_flag = GPSTYPE_NATIVE;
+  this->disable_queue();
   nmea.setUnknownSentenceHandler(gps_nmea_notimp);
 
+  this->gps_baud = this->detectGpsBaud();
+  if (this->gps_baud == 0) {
+    // Keep searching without blocking the UI. Some receivers do not begin
+    // NMEA output until several seconds after the ESP has booted.
+    this->recovery_baud_index = 1; // 9600 is the most common cold-start baud.
+    this->listenAtBaud(GPS_BAUD_RATES[this->recovery_baud_index]);
+    Serial.println(F("GPS: no checksum-valid NMEA detected during startup"));
+  }
+  else {
+    this->gps_enabled = true;
+    Serial.printf("GPS: NMEA detected at %lu baud\n",
+                  static_cast<unsigned long>(this->gps_baud));
+    this->handleCompletedSentence();
+  }
+}
+
+void GpsInterface::listenAtBaud(uint32_t baud) {
+  gpsSerial.end();
+
+  // Arduino HardwareSerial takes ESP RX first and ESP TX second. The board
+  // constants are named for the GPS module pins: GPS_TX feeds ESP RX.
+  gpsSerial.begin(baud, SERIAL_8N1, GPS_TX, GPS_RX);
+  nmea.setBuffer(nmeaBuffer, sizeof(nmeaBuffer));
+  this->listening_baud = baud;
+  this->last_baud_switch_ms = millis();
 }
 
 bool GpsInterface::probeBaud(uint32_t baud) {
-  gpsSerial.end();
-  delay(50);
-
-  gpsSerial.begin(baud, SERIAL_8N1, GPS_TX, GPS_RX);
+  this->listenAtBaud(baud);
 
   uint32_t start = millis();
-  bool sawDollar = false;
-  bool parsedSentence = false;
 
   while (millis() - start < PROBE_MS) {
     while (gpsSerial.available()) {
       char c = (char)gpsSerial.read();
-
-      if (c == '$') {
-        sawDollar = true;
-      }
-
-      // Feed characters directly to MicroNMEA
       if (nmea.process(c)) {
-        parsedSentence = true;
-      }
-
-      // If we’ve seen real NMEA traffic and MicroNMEA parsed something,
-      // this baud is almost certainly correct
-      if (sawDollar && parsedSentence) {
-        return true;
+        const char* sentence = nmea.getSentence();
+        if (sentence != nullptr && sentence[0] == '$' &&
+            MicroNMEA::testChecksum(sentence)) {
+          this->last_sentence_ms = millis();
+          return true;
+        }
       }
     }
     delay(1);
@@ -93,33 +84,13 @@ bool GpsInterface::probeBaud(uint32_t baud) {
   return false;
 }
 
-void GpsInterface::setGpsTo115200From9600() {
-  gpsSerial.print(PCAS_SET_115200);
-  gpsSerial.flush();
-  delay(200);
-}
-
-uint32_t GpsInterface::initGpsBaudAndForce115200() {
-  if (probeBaud(115200)) {
-    return 115200;
-  }
-
-  if (probeBaud(9600)) {
-    setGpsTo115200From9600();
-
-    if (probeBaud(115200)) {
-      return 115200;
+uint32_t GpsInterface::detectGpsBaud() {
+  for (uint8_t i = 0; i < GPS_BAUD_RATE_COUNT; i++) {
+    if (this->probeBaud(GPS_BAUD_RATES[i])) {
+      this->recovery_baud_index = i;
+      return GPS_BAUD_RATES[i];
     }
-
-    probeBaud(9600);
-    return 9600;
   }
-
-  if (probeBaud(38400)) {
-    return 38400;
-  }
-
-  probeBaud(9600);
   return 0;
 }
 
@@ -583,6 +554,15 @@ void GpsInterface::setGPSInfo() {
 
   this->datetime = this->dt_string_from_gps();
 
+  const uint8_t hdop = nmea.getHDOP();
+  this->accuracy = hdop == 255 ? 0.0f : 2.5f * (static_cast<float>(hdop) / 10.0f);
+
+  // Invalid GGA/RMC sentences legitimately report the acquisition state and
+  // satellite count, but their empty coordinates decode to MicroNMEA's
+  // sentinel value. Preserve the last real position until a new fix arrives.
+  if (!this->good_fix)
+    return;
+
   this->lat_int = nmea.getLatitude();
   this->lon_int = nmea.getLongitude();
 
@@ -594,9 +574,27 @@ void GpsInterface::setGPSInfo() {
   }
   this->altf = (float)alt / 1000;
 
-  this->accuracy = 2.5 * ((float)nmea.getHDOP()/10);
-
   //nmea.clear();
+}
+
+void GpsInterface::handleCompletedSentence() {
+  const char* sentence = nmea.getSentence();
+  if (sentence == nullptr || sentence[0] != '$' ||
+      !MicroNMEA::testChecksum(sentence)) {
+    return;
+  }
+
+  const uint32_t now = millis();
+  this->gps_enabled = true;
+  this->last_sentence_ms = now;
+  this->gps_baud = this->listening_baud;
+
+  const char* message = nmea.getMessageID();
+  if (message != nullptr &&
+      (strcmp(message, "GGA") == 0 || strcmp(message, "RMC") == 0)) {
+    this->last_fix_sentence_ms = now;
+    this->setGPSInfo();
+  }
 }
 
 float GpsInterface::getAccuracy() {
@@ -648,6 +646,16 @@ String GpsInterface::getFixStatusAsString() {
 
 bool GpsInterface::getGpsModuleStatus() {
   return this->gps_enabled;
+}
+
+uint32_t GpsInterface::getBaudRate() {
+  return this->gps_baud;
+}
+
+uint32_t GpsInterface::getLastSentenceAgeMs() {
+  if (this->last_sentence_ms == 0)
+    return UINT32_MAX;
+  return millis() - this->last_sentence_ms;
 }
 
 String GpsInterface::getText() {
@@ -754,20 +762,30 @@ String GpsInterface::getNmeaNotparsed() {
 
 void GpsInterface::main() {
   while (gpsSerial.available()) {
-    //Fetch the character one by one
-    char c = gpsSerial.read();
-    //Serial.print(c);
-    //Pass the character to the library
-    nmea.process(c);
+    const char c = gpsSerial.read();
+    if (nmea.process(c))
+      this->handleCompletedSentence();
   }
 
-  uint8_t num_sat = nmea.getNumSatellites();
+  const uint32_t now = millis();
+  if (this->gps_enabled && this->last_sentence_ms != 0 &&
+      now - this->last_sentence_ms > GPS_TRAFFIC_TIMEOUT_MS) {
+    this->gps_enabled = false;
+    this->good_fix = false;
+    this->num_sats = 0;
+    this->gps_baud = 0;
+    this->last_baud_switch_ms = now;
+  }
+  if (this->good_fix && this->last_fix_sentence_ms != 0 &&
+      now - this->last_fix_sentence_ms > GPS_FIX_TIMEOUT_MS) {
+    this->good_fix = false;
+  }
 
-  if ((nmea.isValid()) && (num_sat > 0))
-    this->setGPSInfo();
-
-  else if ((!nmea.isValid()) && (num_sat <= 0)) {
-    this->setGPSInfo();
+  if (!this->gps_enabled &&
+      now - this->last_baud_switch_ms >= RECOVERY_BAUD_DWELL_MS) {
+    this->recovery_baud_index =
+        (this->recovery_baud_index + 1) % GPS_BAUD_RATE_COUNT;
+    this->listenAtBaud(GPS_BAUD_RATES[this->recovery_baud_index]);
   }
 }
 #endif

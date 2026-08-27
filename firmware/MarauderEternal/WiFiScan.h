@@ -169,6 +169,8 @@
 #define BT_ATTACK_FINDMY_LIVE 86
 #define BT_SCAN_ADVERTISEMENT_CAPTURE 87
 #define WIFI_ATTACK_CAMERA_DEAUTH 88
+#define WIFI_ATTACK_SSID_GROUP_CLONE 89
+#define WIFI_SCAN_SSID_FINDER 90
 
 #define WIFI_ATTACK_FUNNY_BEACON 99 
 
@@ -437,12 +439,62 @@ class WiFiScan
     uint32_t initTime = 0;
     uint32_t last_ui_update = 0;
     uint32_t last_sour_apple_update = 0;
+    #if defined(MARAUDER_MINI_V3) && defined(HAS_GPS)
+      bool gps_datetime_selected = false;
+      uint16_t gps_datetime_scroll_offset = 0;
+      int8_t gps_datetime_scroll_direction = 1;
+      uint32_t gps_datetime_next_scroll_ms = 0;
+      int16_t gps_datetime_row_y = -1;
+      String gps_datetime_display_value = "";
+    #endif
     WiFiCameraDetector::DeauthTarget camera_deauth_targets{};
     uint8_t camera_deauth_cursor = 0;
     uint8_t camera_deauth_view = 0;
     uint32_t camera_deauth_next_ui = 0;
     bool run_setup = true;
+    bool ssid_group_scan_pending = false;
+
+    static constexpr uint8_t SSID_FINDER_SAMPLE_WINDOW = 5;
+    struct SSIDFinderAP {
+      int16_t ap_index = -1;
+      uint8_t bssid[6] = {};
+      uint8_t channel = 1;
+      int16_t filtered_rssi_q4 = -512;
+      int8_t raw_rssi = -128;
+      int8_t samples[SSID_FINDER_SAMPLE_WINDOW] = {};
+      uint8_t sample_count = 0;
+      uint8_t sample_cursor = 0;
+      uint32_t last_seen_ms = 0;
+      bool found = false;
+    };
+
+    String ssid_finder_name = "";
+    std::vector<SSIDFinderAP> ssid_finder_aps;
+    std::vector<uint8_t> ssid_finder_channels;
+    int16_t ssid_finder_active = -1;
+    int16_t ssid_finder_challenger = -1;
+    uint8_t ssid_finder_challenger_cycles = 0;
+    uint8_t ssid_finder_channel_cursor = 0;
+    bool ssid_finder_locked = false;
+    int8_t ssid_finder_trend = 0;
+    int8_t ssid_finder_trend_baseline = -128;
+    uint32_t ssid_finder_next_trend_ms = 0;
+    uint32_t ssid_finder_switch_notice_until = 0;
+    #ifdef HAS_SCREEN
+      TFT_eSprite* ssid_finder_sprite = nullptr;
+    #endif
+
     void initWiFi(uint8_t scan_mode);
+    void RunSSIDFinder(uint8_t scan_mode, uint16_t color);
+    void runSSIDFinder(uint32_t current_time);
+    void drawSSIDFinder(uint32_t current_time);
+    void recordSSIDFinderPacket(const uint8_t bssid[6], int8_t rssi,
+                                uint32_t current_time);
+    void evaluateSSIDFinderTarget(uint32_t current_time,
+                                  bool require_hysteresis = true);
+    void resetSSIDFinder();
+    int8_t ssidFinderRssi(int16_t finder_index) const;
+    uint32_t ssidFinderFreshWindowMs() const;
     uint8_t bluetoothScanTime = 5;
     int packets_sent = 0;
     const wifi_promiscuous_filter_t filt = {.filter_mask=WIFI_PROMIS_FILTER_MASK_MGMT | WIFI_PROMIS_FILTER_MASK_DATA};
@@ -720,7 +772,7 @@ class WiFiScan
 
     void runFoxHunt(uint32_t currentTime);
     void throwThatShitInACircle();
-    void displayTargetFilter();
+    void displayTargetFilter(uint8_t scan_mode);
     void displayTransmitRate();
     void prepareScanStage(uint16_t color_1, uint16_t color_2);
     void setLEDMode(int mode);
@@ -780,6 +832,12 @@ class WiFiScan
     void executeFindMyLive(uint32_t current_time);
     void RunAPScan(uint8_t scan_mode, uint16_t color);
     void RunGPSNmea();
+    #if defined(MARAUDER_MINI_V3) && defined(HAS_GPS)
+      void resetMiniGpsDateTime(uint32_t current_time = 0,
+                                bool clear_selection = true);
+      void drawMiniGpsDateTime();
+      void updateMiniGpsDateTime(uint32_t current_time);
+    #endif
     void RunPwnScan(uint8_t scan_mode, uint16_t color);
     void RunPineScan(uint8_t scan_mode, uint16_t color);
     void RunMultiSSIDScan(uint8_t scan_mode, uint16_t color);
@@ -1038,6 +1096,10 @@ class WiFiScan
     void StopScan(uint8_t scan_mode);
     void setCameraDeauthTargets(
         const WiFiCameraDetector::DeauthTarget& targets);
+    void prepareSSIDGroupScan();
+    bool prepareSSIDFinder(const String& ssid_name);
+    void toggleSSIDFinderLock();
+    void markSSIDFinderFound();
     void setBaseMacAddress(uint8_t macAddr[6]);
 
     uint16_t poiCount = 0;

@@ -34,6 +34,7 @@ constexpr uint16_t MINI_MENU_REPEAT_INTERVAL_MS = 120;
 constexpr uint16_t MINI_UI_SURFACE = 0x18E3;
 constexpr uint16_t MINI_UI_BORDER = 0x31A6;
 constexpr uint16_t MINI_UI_ACCENT = 0x733F;
+constexpr uint16_t MINI_UI_SELECTED = 0x03E0;  // Dark green with readable white text.
 constexpr uint16_t MINI_UI_TEXT = TFT_WHITE;
 constexpr uint16_t MINI_UI_MUTED = 0xA514;
 constexpr uint16_t MINI_UI_DANGER = TFT_RED;
@@ -196,12 +197,29 @@ void MenuFunctions::drawMiniMenuButton(int b, int x, bool selected, uint16_t tex
   MenuNode mini_node = current_menu->list->get(x);
 
   #ifdef MARAUDER_MINI_V3
+    (void)selected;
     String label = mini_node.name;
     label.trim();
     if (current_menu == &bluetoothMenu && x == 2)
       label = "BLE Attacks";
     else if (current_menu == &bluetoothMenu && x == 3)
       label = "BLE Discovery";
+
+    const bool is_setting_node =
+        mini_node.icon == SETTINGS && mini_node.color == TFTLIGHTGREY;
+    const bool cursor_highlighted = current_menu->selected == x;
+    const bool item_selected = mini_node.selected && !is_setting_node;
+    const bool emphasized = cursor_highlighted || item_selected;
+    const uint16_t state_background = item_selected
+                                          ? MINI_UI_SELECTED
+                                          : (cursor_highlighted
+                                                 ? MINI_UI_ACCENT
+                                                 : MINI_UI_SURFACE);
+    const uint16_t state_border = cursor_highlighted
+                                      ? MINI_UI_ACCENT
+                                      : (item_selected
+                                             ? MINI_UI_SELECTED
+                                             : MINI_UI_BORDER);
 
     miniUiTft().setFreeFont(NULL);
     miniUiTft().setTextSize(1);
@@ -212,10 +230,10 @@ void MenuFunctions::drawMiniMenuButton(int b, int x, bool selected, uint16_t tex
       const int16_t card_y = 21 + ((x / 2) * 35);
       const int16_t card_width = 59;
       const int16_t card_height = 32;
-      const uint16_t background = selected ? MINI_UI_ACCENT : MINI_UI_SURFACE;
-      const uint16_t border = selected ? MINI_UI_ACCENT : MINI_UI_BORDER;
-      uint16_t icon_color = selected ? MINI_UI_TEXT : MINI_UI_MUTED;
-      if (!selected && mini_node.icon == REBOOT)
+      const uint16_t background = state_background;
+      const uint16_t border = state_border;
+      uint16_t icon_color = emphasized ? MINI_UI_TEXT : MINI_UI_MUTED;
+      if (!emphasized && mini_node.icon == REBOOT)
         icon_color = MINI_UI_DANGER;
 
       miniUiTft().fillRoundRect(card_x, card_y, card_width, card_height, 5, background);
@@ -228,9 +246,9 @@ void MenuFunctions::drawMiniMenuButton(int b, int x, bool selected, uint16_t tex
     const bool is_wifi_category = (current_menu == &wifiMenu);
     const bool is_bluetooth_category = (current_menu == &bluetoothMenu);
     if ((is_wifi_category || is_bluetooth_category) && x == 0) {
-      const uint16_t background = selected ? MINI_UI_ACCENT : MINI_UI_SURFACE;
+      const uint16_t background = state_background;
       miniUiTft().fillRoundRect(2, 9, 17, 10, 4, background);
-      drawMiniBackGlyph(7, 10, selected ? MINI_UI_TEXT : MINI_UI_MUTED);
+      drawMiniBackGlyph(7, 10, emphasized ? MINI_UI_TEXT : MINI_UI_MUTED);
       return;
     }
 
@@ -240,9 +258,9 @@ void MenuFunctions::drawMiniMenuButton(int b, int x, bool selected, uint16_t tex
       const int16_t card_y = 22 + ((tile_index / 2) * 51);
       const int16_t card_width = 59;
       const int16_t card_height = 47;
-      const uint16_t background = selected ? MINI_UI_ACCENT : MINI_UI_SURFACE;
-      const uint16_t border = selected ? MINI_UI_ACCENT : MINI_UI_BORDER;
-      const uint16_t icon_color = selected ? MINI_UI_TEXT : MINI_UI_MUTED;
+      const uint16_t background = state_background;
+      const uint16_t border = state_border;
+      const uint16_t icon_color = emphasized ? MINI_UI_TEXT : MINI_UI_MUTED;
       uint8_t category_icon = mini_node.icon;
       if (x == 4)
         category_icon = SETTINGS;
@@ -259,9 +277,9 @@ void MenuFunctions::drawMiniMenuButton(int b, int x, bool selected, uint16_t tex
       const int16_t card_y = 23 + ((x - 1) * 33);
       const int16_t card_width = 120;
       const int16_t card_height = 29;
-      const uint16_t background = selected ? MINI_UI_ACCENT : MINI_UI_SURFACE;
-      const uint16_t border = selected ? MINI_UI_ACCENT : MINI_UI_BORDER;
-      const uint16_t icon_color = selected ? MINI_UI_TEXT : MINI_UI_MUTED;
+      const uint16_t background = state_background;
+      const uint16_t border = state_border;
+      const uint16_t icon_color = emphasized ? MINI_UI_TEXT : MINI_UI_MUTED;
 
       miniUiTft().fillRoundRect(card_x, card_y, card_width, card_height, 6, background);
       miniUiTft().drawRoundRect(card_x, card_y, card_width, card_height, 6, border);
@@ -271,7 +289,8 @@ void MenuFunctions::drawMiniMenuButton(int b, int x, bool selected, uint16_t tex
       miniUiTft().setCursor(-static_cast<int16_t>(text_offset), 0);
       miniUiTft().print(label);
       miniUiTft().resetViewport();
-      drawMiniChevron(card_x + 109, card_y + 11, selected ? MINI_UI_TEXT : MINI_UI_MUTED);
+      drawMiniChevron(card_x + 109, card_y + 11,
+                      emphasized ? MINI_UI_TEXT : MINI_UI_MUTED);
       return;
     }
 
@@ -285,11 +304,11 @@ void MenuFunctions::drawMiniMenuButton(int b, int x, bool selected, uint16_t tex
       const int16_t cursor_x = text_width > viewport_width
                                  ? -static_cast<int16_t>(text_offset)
                                  : (viewport_width - text_width) / 2;
-      const uint16_t background = selected ? MINI_UI_ACCENT : MINI_UI_SURFACE;
+      const uint16_t background = state_background;
 
       miniUiTft().fillRoundRect(row_x, row_y, row_width, row_height, 4, background);
       miniUiTft().drawRoundRect(row_x, row_y, row_width, row_height, 4,
-                                selected ? MINI_UI_ACCENT : MINI_UI_BORDER);
+                                state_border);
       miniUiTft().setTextColor(MINI_UI_TEXT, background);
       miniUiTft().setViewport(row_x + 2, row_y, viewport_width, row_height);
       miniUiTft().setCursor(cursor_x, 4);
@@ -298,18 +317,20 @@ void MenuFunctions::drawMiniMenuButton(int b, int x, bool selected, uint16_t tex
       return;
     }
 
-    const bool is_setting_node = (mini_node.icon == SETTINGS && mini_node.color == TFTLIGHTGREY);
     const int16_t row_x = 4;
     const int16_t row_y = 22 + (b * 17);
     const int16_t row_width = 120;
     const int16_t row_height = 15;
-    const uint16_t background = selected ? MINI_UI_ACCENT : MINI_UI_SURFACE;
-    const uint16_t border = selected ? MINI_UI_ACCENT : MINI_UI_BORDER;
+    const uint16_t background = state_background;
+    const uint16_t border = state_border;
     String lower_label = label;
     lower_label.toLowerCase();
     const bool is_danger = (mini_node.icon == REBOOT || lower_label.indexOf("delete") >= 0 ||
                             lower_label.indexOf("erase") >= 0 || lower_label.indexOf("clear") >= 0);
-    const uint16_t detail_color = selected ? MINI_UI_TEXT : (is_danger ? MINI_UI_DANGER : MINI_UI_MUTED);
+    const uint16_t detail_color = emphasized
+                                      ? MINI_UI_TEXT
+                                      : (is_danger ? MINI_UI_DANGER
+                                                   : MINI_UI_MUTED);
 
     miniUiTft().fillRoundRect(row_x, row_y, row_width, row_height, 4, background);
     miniUiTft().drawRoundRect(row_x, row_y, row_width, row_height, 4, border);
@@ -329,7 +350,9 @@ void MenuFunctions::drawMiniMenuButton(int b, int x, bool selected, uint16_t tex
     if (is_setting_node) {
       const int16_t toggle_x = row_x + 94;
       const int16_t toggle_y = row_y + 3;
-      const uint16_t toggle_color = mini_node.selected ? MINI_UI_ACCENT : MINI_UI_BORDER;
+      const uint16_t toggle_color = mini_node.selected
+                                        ? MINI_UI_SELECTED
+                                        : MINI_UI_BORDER;
       miniUiTft().fillRoundRect(toggle_x, toggle_y, 22, 9, 5, toggle_color);
       miniUiTft().fillCircle(toggle_x + (mini_node.selected ? 17 : 5), toggle_y + 4, 3, MINI_UI_TEXT);
     }
@@ -477,7 +500,6 @@ void MenuFunctions::selectMiniMenuIndex(int target_index) {
   if (target_index == previous_index)
     return;
 
-  const MenuNode previous_node = current_menu->list->get(previous_index);
   current_menu->selected = target_index;
   this->resetMiniMenuMarquee();
 
@@ -491,10 +513,7 @@ void MenuFunctions::selectMiniMenuIndex(int target_index) {
   }
 
   this->buttonSelected(target_index - menu_start_index, target_index);
-  if (!previous_node.selected ||
-      (previous_node.icon == SETTINGS && previous_node.color == TFTLIGHTGREY)) {
-    this->buttonNotSelected(previous_index - menu_start_index, previous_index);
-  }
+  this->buttonNotSelected(previous_index - menu_start_index, previous_index);
 }
 
 void MenuFunctions::navigateMiniMenu(int8_t horizontal, int8_t vertical) {
@@ -769,7 +788,8 @@ void MenuFunctions::main(uint32_t currentTime)
     if (currentTime - initTime >= BANNER_TIME) {
       this->initTime = millis();
       if ((wifi_scan_obj.currentScanMode != LV_JOIN_WIFI) &&
-          (wifi_scan_obj.currentScanMode != LV_ADD_SSID))
+          (wifi_scan_obj.currentScanMode != LV_ADD_SSID) &&
+          (wifi_scan_obj.currentScanMode != WIFI_SCAN_SSID_FINDER))
         this->updateStatusBar();
       
       // Do channel analyzer stuff
@@ -801,8 +821,10 @@ void MenuFunctions::main(uint32_t currentTime)
   // Get the display buffer out of the way
   if ((wifi_scan_obj.currentScanMode != WIFI_SCAN_OFF ) &&
       (wifi_scan_obj.currentScanMode != WIFI_CONNECTED) &&
+      (wifi_scan_obj.currentScanMode != WIFI_SCAN_SSID_FINDER) &&
       (wifi_scan_obj.currentScanMode != WIFI_ATTACK_BEACON_SPAM) &&
       (wifi_scan_obj.currentScanMode != WIFI_ATTACK_AP_SPAM) &&
+      (wifi_scan_obj.currentScanMode != WIFI_ATTACK_SSID_GROUP_CLONE) &&
       (wifi_scan_obj.currentScanMode != WIFI_ATTACK_CSA) &&
       (wifi_scan_obj.currentScanMode != WIFI_ATTACK_QUIET) &&
       (wifi_scan_obj.currentScanMode != WIFI_ATTACK_AUTH) &&
@@ -922,6 +944,7 @@ void MenuFunctions::main(uint32_t currentTime)
           (wifi_scan_obj.currentScanMode == WIFI_SCAN_ALL) ||
           (wifi_scan_obj.currentScanMode == WIFI_ATTACK_BEACON_SPAM) ||
           (wifi_scan_obj.currentScanMode == WIFI_ATTACK_AP_SPAM) ||
+          (wifi_scan_obj.currentScanMode == WIFI_ATTACK_SSID_GROUP_CLONE) ||
           (wifi_scan_obj.currentScanMode == WIFI_ATTACK_CSA) ||
           (wifi_scan_obj.currentScanMode == WIFI_ATTACK_QUIET) ||
           (wifi_scan_obj.currentScanMode == WIFI_ATTACK_AUTH) ||
@@ -986,6 +1009,28 @@ void MenuFunctions::main(uint32_t currentTime)
       bool c_btn_press = this->isKeyPressed('(');
     #endif
 
+    #ifdef MARAUDER_MINI_V3
+      if (wifi_scan_obj.currentScanMode == WIFI_SCAN_SSID_FINDER) {
+        u_btn.justPressed();
+        d_btn.justPressed();
+        const bool left_pressed = l_btn.justPressed();
+        const bool right_pressed = r_btn.justPressed();
+
+        if (left_pressed) {
+          wifi_scan_obj.StartScan(WIFI_SCAN_OFF);
+          display_obj.init();
+          this->changeMenu(current_menu, true);
+        }
+        else if (c_btn_press) {
+          wifi_scan_obj.toggleSSIDFinderLock();
+        }
+        else if (right_pressed) {
+          wifi_scan_obj.markSSIDFinderFound();
+        }
+        return;
+      }
+    #endif
+
     #ifndef HAS_ILI9341
     
       if ((c_btn_press) &&
@@ -1031,6 +1076,7 @@ void MenuFunctions::main(uint32_t currentTime)
             (wifi_scan_obj.currentScanMode == WIFI_SCAN_DEAUTH) ||
             (wifi_scan_obj.currentScanMode == WIFI_ATTACK_BEACON_SPAM) ||
             (wifi_scan_obj.currentScanMode == WIFI_ATTACK_AP_SPAM) ||
+            (wifi_scan_obj.currentScanMode == WIFI_ATTACK_SSID_GROUP_CLONE) ||
             (wifi_scan_obj.currentScanMode == WIFI_ATTACK_CSA) ||
             (wifi_scan_obj.currentScanMode == WIFI_ATTACK_QUIET) ||
             (wifi_scan_obj.currentScanMode == WIFI_ATTACK_AUTH) ||
@@ -1108,6 +1154,7 @@ void MenuFunctions::main(uint32_t currentTime)
   #ifdef HAS_ILI9341
     if ((wifi_scan_obj.currentScanMode != WIFI_ATTACK_BEACON_SPAM) &&
         (wifi_scan_obj.currentScanMode != WIFI_ATTACK_AP_SPAM) &&
+        (wifi_scan_obj.currentScanMode != WIFI_ATTACK_SSID_GROUP_CLONE) &&
         (wifi_scan_obj.currentScanMode != WIFI_ATTACK_CSA) &&
         (wifi_scan_obj.currentScanMode != WIFI_ATTACK_QUIET) &&
         (wifi_scan_obj.currentScanMode != WIFI_ATTACK_AUTH) &&
@@ -1668,13 +1715,12 @@ void MenuFunctions::updateStatusBar()
 
   // GPS Stuff
   #ifdef HAS_GPS
-    if (gps_obj.getGpsModuleStatus()) {
-      if (gps_obj.getFixStatus())
-        the_color = TFT_GREEN;
-      else
-        the_color = TFT_RED;
-        
-      #ifdef HAS_FULL_SCREEN
+    const bool gps_locked = gps_obj.getFixStatus();
+    the_color = TFT_GREEN;
+
+    #ifdef HAS_FULL_SCREEN
+      display_obj.tft.fillRect(0, 0, 43, STATUS_BAR_WIDTH, STATUSBAR_COLOR);
+      if (gps_locked) {
         display_obj.tft.drawXBitmap(4,
                                     0,
                                     menu_icons[STATUS_GPS],
@@ -1685,11 +1731,15 @@ void MenuFunctions::updateStatusBar()
         display_obj.tft.setTextColor(TFT_WHITE, STATUSBAR_COLOR, true);
 
         display_obj.tft.drawString(gps_obj.getNumSatsString(), 22, 0, 2);
-      #elif defined(HAS_SCREEN)
+      }
+    #elif defined(HAS_SCREEN)
+      display_obj.tft.fillRect(0, 0, TFT_WIDTH / 4, STATUS_BAR_WIDTH,
+                               STATUSBAR_COLOR);
+      if (gps_locked) {
         display_obj.tft.setTextColor(the_color, STATUSBAR_COLOR, true);
         display_obj.tft.drawString("GPS", 0, 0, 1);
-      #endif
-    }
+      }
+    #endif
   #endif
 
   display_obj.tft.setTextColor(TFT_WHITE, STATUSBAR_COLOR, true);
@@ -1854,13 +1904,11 @@ void MenuFunctions::drawStatusBar()
 
   // GPS Stuff
   #ifdef HAS_GPS
-    if (gps_obj.getGpsModuleStatus()) {
-      if (gps_obj.getFixStatus())
-        the_color = TFT_GREEN;
-      else
-        the_color = TFT_RED;
-        
-      #ifdef HAS_FULL_SCREEN
+    const bool gps_locked = gps_obj.getFixStatus();
+    the_color = TFT_GREEN;
+
+    #ifdef HAS_FULL_SCREEN
+      if (gps_locked) {
         display_obj.tft.drawXBitmap(4,
                                     0,
                                     menu_icons[STATUS_GPS],
@@ -1871,8 +1919,13 @@ void MenuFunctions::drawStatusBar()
         display_obj.tft.setTextColor(TFT_WHITE, STATUSBAR_COLOR);
 
         display_obj.tft.drawString(gps_obj.getNumSatsString(), 22, 0, 2);
-      #endif
-    }
+      }
+    #elif defined(HAS_SCREEN)
+      if (gps_locked) {
+        display_obj.tft.setTextColor(the_color, STATUSBAR_COLOR, true);
+        display_obj.tft.drawString("GPS", 0, 0, 1);
+      }
+    #endif
   #endif
 
   display_obj.tft.setTextColor(TFT_WHITE, STATUSBAR_COLOR);
@@ -2317,6 +2370,295 @@ bool MenuFunctions::isKeyPressed(char c)
   }
 #endif
 
+void MenuFunctions::buildSSIDGroupMenu(bool fox_hunt_mode,
+                                       bool finder_mode) {
+  extern LinkedList<AccessPoint>* access_points;
+
+  ssidGroupMenu.list->clear();
+  ssidGroupMenu.name = finder_mode
+                           ? "SSID Finder"
+                           : (fox_hunt_mode ? "Fox Hunt SSID"
+                                            : "Select SSIDs");
+  ssidGroupMenu.parentMenu = &wifiSnifferMenu;
+
+  this->addNodes(&ssidGroupMenu, text09, TFTLIGHTGREY, 0,
+                 [this, fox_hunt_mode]() {
+    if (fox_hunt_mode) {
+      extern LinkedList<AccessPoint>* access_points;
+      for (int index = 0; index < access_points->size(); index++) {
+        AccessPoint access_point = access_points->get(index);
+        access_point.selected = false;
+        access_points->set(index, access_point);
+      }
+    }
+    this->changeMenu(ssidGroupMenu.parentMenu, true);
+  });
+
+  if (access_points->size() == 0) {
+    this->addNodes(&ssidGroupMenu, "No APs - scan first", TFTORANGE,
+                   DEVICE_INFO, []() {});
+    return;
+  }
+
+  struct SSIDGroupSummary {
+    String name;
+    int8_t strongest_rssi;
+  };
+
+  std::vector<SSIDGroupSummary> groups;
+  for (int index = 0; index < access_points->size(); index++) {
+    const String group_name = access_points->get(index).essid;
+    int group_index = -1;
+    for (int candidate = 0; candidate < static_cast<int>(groups.size()); candidate++) {
+      if (groups[candidate].name == group_name) {
+        group_index = candidate;
+        break;
+      }
+    }
+
+    if (group_index < 0) {
+      groups.push_back({group_name, access_points->get(index).rssi});
+    }
+    else if (access_points->get(index).rssi > groups[group_index].strongest_rssi) {
+      groups[group_index].strongest_rssi = access_points->get(index).rssi;
+    }
+  }
+
+  std::sort(groups.begin(), groups.end(),
+            [](const SSIDGroupSummary& left,
+               const SSIDGroupSummary& right) {
+    if (left.strongest_rssi != right.strongest_rssi)
+      return left.strongest_rssi > right.strongest_rssi;
+    return left.name.compareTo(right.name) < 0;
+  });
+
+  for (const SSIDGroupSummary& group : groups) {
+    const String group_name = group.name;
+
+    uint16_t ap_count = 0;
+    uint16_t channel_count = 0;
+    uint16_t selected_count = 0;
+    bool channels[256] = {};
+    for (int ap_index = 0; ap_index < access_points->size(); ap_index++) {
+      const AccessPoint access_point = access_points->get(ap_index);
+      if (access_point.essid != group_name)
+        continue;
+
+      ap_count++;
+      if (!channels[access_point.channel]) {
+        channels[access_point.channel] = true;
+        channel_count++;
+      }
+      if (access_point.selected)
+        selected_count++;
+    }
+
+    const String ssid_name = group_name.length() > 0 ? group_name : "<Hidden SSID>";
+    const String selection_count = finder_mode
+                                       ? String(ap_count)
+                                       : String(selected_count) + "/" +
+                                             String(ap_count);
+    const String display_name = String(group.strongest_rssi) + " " +
+                                ssid_name + " [" + selection_count +
+                                " AP, " + String(channel_count) + " CH]";
+    this->addNodes(&ssidGroupMenu, display_name.c_str(),
+                   rssiToMenuColor(group.strongest_rssi), WIFI,
+                   [this, group_name, fox_hunt_mode, finder_mode]() {
+      if (finder_mode) {
+        if (wifi_scan_obj.prepareSSIDFinder(group_name)) {
+          display_obj.clearScreen();
+          wifi_scan_obj.StartScan(WIFI_SCAN_SSID_FINDER, TFT_CYAN);
+        }
+        else {
+          Serial.println(F("[SSID Finder] No usable APs in the selected SSID"));
+        }
+        return;
+      }
+
+      this->buildSSIDAPMenu(group_name, fox_hunt_mode);
+      this->changeMenu(&ssidAPMenu, true);
+    }, finder_mode ? false
+                   : (fox_hunt_mode ? selected_count > 0
+                                    : ap_count > 0 &&
+                                          selected_count == ap_count));
+  }
+}
+
+void MenuFunctions::buildSSIDAPMenu(const String& group_name,
+                                    bool fox_hunt_mode) {
+  extern LinkedList<AccessPoint>* access_points;
+
+  ssidAPMenu.list->clear();
+  ssidAPMenu.name = group_name.length() > 0 ? group_name : "Hidden SSID";
+  ssidAPMenu.parentMenu = &ssidGroupMenu;
+
+  this->addNodes(&ssidAPMenu, text09, TFTLIGHTGREY, 0,
+                 [this, fox_hunt_mode]() {
+    const uint16_t group_selection = ssidGroupMenu.selected;
+    this->buildSSIDGroupMenu(fox_hunt_mode);
+    this->changeMenu(&ssidGroupMenu, true, group_selection);
+  });
+
+  std::vector<int> group_ap_indices;
+  for (int index = 0; index < access_points->size(); index++) {
+    if (access_points->get(index).essid == group_name)
+      group_ap_indices.push_back(index);
+  }
+  std::sort(group_ap_indices.begin(), group_ap_indices.end(),
+            [](int left_index, int right_index) {
+    extern LinkedList<AccessPoint>* access_points;
+    const AccessPoint left = access_points->get(left_index);
+    const AccessPoint right = access_points->get(right_index);
+    if (left.rssi != right.rssi)
+      return left.rssi > right.rssi;
+    return memcmp(left.bssid, right.bssid, sizeof(left.bssid)) < 0;
+  });
+
+  const uint16_t group_ap_count = group_ap_indices.size();
+  bool all_selected = true;
+  int fox_hunt_target_index = -1;
+  for (const int index : group_ap_indices) {
+    const AccessPoint access_point = access_points->get(index);
+    if (!access_point.selected)
+      all_selected = false;
+    else if (fox_hunt_mode)
+      fox_hunt_target_index = index;
+
+    const String display_name = String(access_point.rssi) + " dBm " +
+                                macToString(access_point.bssid) +
+                                " CH" + String(access_point.channel);
+    const uint16_t menu_index = ssidAPMenu.list->size();
+    this->addNodes(&ssidAPMenu, display_name.c_str(),
+                   rssiToMenuColor(access_point.rssi), WIFI,
+                   [this, group_name, fox_hunt_mode, index, menu_index]() {
+      extern LinkedList<AccessPoint>* access_points;
+      if (index >= access_points->size() ||
+          access_points->get(index).essid != group_name)
+        return;
+
+      AccessPoint access_point = access_points->get(index);
+      if (fox_hunt_mode && !access_point.selected) {
+        for (int ap_index = 0; ap_index < access_points->size(); ap_index++) {
+          if (ap_index != index && access_points->get(ap_index).selected) {
+            #ifdef MARAUDER_MINI_V3
+              this->showMiniMenuError(
+                  "Only one AP at a time can be selected for a fox hunt.",
+                  &ssidAPMenu, menu_index);
+            #else
+              Serial.println(F("Only one AP at a time can be selected for a fox hunt."));
+              this->changeMenu(&ssidAPMenu, true, menu_index);
+            #endif
+            return;
+          }
+        }
+      }
+
+      access_point.selected = !access_point.selected;
+      access_points->set(index, access_point);
+      this->buildSSIDAPMenu(group_name, fox_hunt_mode);
+      this->changeMenu(&ssidAPMenu, true, menu_index);
+    }, access_point.selected);
+  }
+
+  if (group_ap_count == 0) {
+    this->addNodes(&ssidAPMenu, "No APs - scan first", TFTORANGE,
+                   DEVICE_INFO, []() {});
+    return;
+  }
+
+  if (fox_hunt_mode) {
+    if (fox_hunt_target_index >= 0) {
+      this->addNodes(&ssidAPMenu, "Start Fox Hunt", TFTGREEN, SCANNERS,
+                     [this, fox_hunt_target_index]() {
+        extern LinkedList<AccessPoint>* access_points;
+        if (fox_hunt_target_index < 0 ||
+            fox_hunt_target_index >= access_points->size() ||
+            !access_points->get(fox_hunt_target_index).selected)
+          return;
+
+        display_obj.clearScreen();
+        this->drawStatusBar();
+        wifi_scan_obj.StartScan(WIFI_SCAN_SIG_STREN, TFT_CYAN);
+      });
+    }
+    return;
+  }
+
+  this->addNodes(&ssidAPMenu, "Select All", TFTGREEN, 255,
+                 [this, group_name]() {
+    extern LinkedList<AccessPoint>* access_points;
+    bool whole_group_selected = true;
+    bool found_group_ap = false;
+    for (int index = 0; index < access_points->size(); index++) {
+      const AccessPoint access_point = access_points->get(index);
+      if (access_point.essid != group_name)
+        continue;
+      found_group_ap = true;
+      if (!access_point.selected)
+        whole_group_selected = false;
+    }
+
+    const bool select_group = !found_group_ap || !whole_group_selected;
+    for (int index = 0; index < access_points->size(); index++) {
+      AccessPoint access_point = access_points->get(index);
+      if (access_point.essid == group_name) {
+        access_point.selected = select_group;
+        access_points->set(index, access_point);
+      }
+    }
+
+    this->buildSSIDAPMenu(group_name, false);
+    this->changeMenu(&ssidAPMenu, true, ssidAPMenu.list->size() - 1);
+  }, all_selected);
+}
+
+#ifdef MARAUDER_MINI_V3
+void MenuFunctions::showMiniMenuError(const char* message,
+                                      Menu* return_menu,
+                                      uint16_t return_index) {
+  const int16_t box_x = 4;
+  const int16_t box_y = 25;
+  const int16_t box_width = TFT_WIDTH - 8;
+  const int16_t box_height = TFT_HEIGHT - 31;
+
+  display_obj.tft.fillRoundRect(box_x, box_y, box_width, box_height, 5,
+                                TFT_BLACK);
+  display_obj.tft.drawRoundRect(box_x, box_y, box_width, box_height, 5,
+                                TFT_RED);
+  display_obj.tft.setFreeFont(NULL);
+  display_obj.tft.setTextSize(1);
+  display_obj.tft.setTextColor(TFT_RED, TFT_BLACK);
+  display_obj.tft.drawCentreString("FOX HUNT", TFT_WIDTH / 2, box_y + 6, 1);
+
+  display_obj.tft.setViewport(box_x + 7, box_y + 22,
+                              box_width - 14, box_height - 44);
+  display_obj.tft.setCursor(0, 0);
+  display_obj.tft.setTextColor(TFT_WHITE, TFT_BLACK);
+  display_obj.tft.setTextWrap(true);
+  display_obj.tft.print(message);
+  display_obj.tft.setTextWrap(false);
+  display_obj.tft.resetViewport();
+
+  display_obj.tft.setTextColor(TFT_GREEN, TFT_BLACK);
+  display_obj.tft.drawCentreString("CENTER: OK", TFT_WIDTH / 2,
+                                   box_y + box_height - 14, 1);
+
+  while (miniMenuButtonDown(c_btn)) {
+    c_btn.justPressed();
+    delay(10);
+  }
+  c_btn.justPressed();
+  while (!c_btn.justPressed())
+    delay(10);
+  while (miniMenuButtonDown(c_btn)) {
+    c_btn.justPressed();
+    delay(10);
+  }
+
+  this->changeMenu(return_menu, true, return_index);
+}
+#endif
+
 // Function to build the menus
 void MenuFunctions::RunSetup()
 {
@@ -2347,10 +2689,8 @@ void MenuFunctions::RunSetup()
     gamesMenu.list = new LinkedList<MenuNode>();
   #endif
   #ifdef HAS_GPS
-    if (gps_obj.getGpsModuleStatus()) {
-      gpsMenu.list = new LinkedList<MenuNode>();
-      gpsInfoMenu.list = new LinkedList<MenuNode>();
-    }
+    gpsMenu.list = new LinkedList<MenuNode>();
+    gpsInfoMenu.list = new LinkedList<MenuNode>();
   #endif
 
   // Device menu stuff
@@ -2369,8 +2709,9 @@ void MenuFunctions::RunSetup()
   #endif*/
   wifiGeneralMenu.list = new LinkedList<MenuNode>();
   wifiAPMenu.list = new LinkedList<MenuNode>();
+  ssidGroupMenu.list = new LinkedList<MenuNode>();
+  ssidAPMenu.list = new LinkedList<MenuNode>();
   wifiIPMenu.list = new LinkedList<MenuNode>();
-  apInfoMenu.list = new LinkedList<MenuNode>();
   setMacMenu.list = new LinkedList<MenuNode>();
   genAPMacMenu.list = new LinkedList<MenuNode>();
   wifiStationMenu.list = new LinkedList<MenuNode>();
@@ -2439,6 +2780,8 @@ void MenuFunctions::RunSetup()
   wifiScannerMenu.name = "Scanners";
   wifiAttackMenu.name = text_table1[21];
   wifiGeneralMenu.name = text_table1[22];
+  ssidGroupMenu.name = "Select SSIDs";
+  ssidAPMenu.name = "Access Points";
   saveFileMenu.name = "Save/Load Files";
   saveSSIDsMenu.name = "Save SSIDs";
   loadSSIDsMenu.name = "Load SSIDs";
@@ -2458,7 +2801,6 @@ void MenuFunctions::RunSetup()
   clearAPsMenu.name = text_table1[29];
   wifiAPMenu.name = "Select";
   wifiIPMenu.name = "Active IPs";
-  apInfoMenu.name = "AP Info";
   setMacMenu.name = "Set MACs";
   genAPMacMenu.name = "Generate AP MAC";
   wifiStationMenu.name = "Select Stations";
@@ -2505,11 +2847,9 @@ void MenuFunctions::RunSetup()
     });
   #endif
   #ifdef HAS_GPS
-	if (gps_obj.getGpsModuleStatus()) {
-    	this->addNodes(&mainMenu, text1_66, TFTRED, GPS_MENU, [this]() {
-      	this->changeMenu(&gpsMenu, true);
-    	});
-	}
+    this->addNodes(&mainMenu, text1_66, TFTRED, GPS_MENU, [this]() {
+      this->changeMenu(&gpsMenu, true);
+    });
   #endif
   #ifdef MARAUDER_MINI_V3
     this->addNodes(&mainMenu, "Games", TFTGREEN, GENERAL_APPS, [this]() {
@@ -2671,6 +3011,22 @@ void MenuFunctions::RunSetup()
   this->addNodes(&wifiSnifferMenu, text09, TFTLIGHTGREY, 0, [this]() {
     this->changeMenu(wifiSnifferMenu.parentMenu, true);
   });
+  this->addNodes(&wifiSnifferMenu, "Scan SSIDs", TFTGREEN, BEACON_SNIFF, [this]() {
+    wifi_scan_obj.prepareSSIDGroupScan();
+    display_obj.clearScreen();
+    this->drawStatusBar();
+    wifi_scan_obj.StartScan(WIFI_SCAN_AP, TFT_GREEN);
+  });
+  this->addNodes(&wifiSnifferMenu, "Select SSIDs", TFTGREEN,
+                 KEYBOARD_ICO, [this]() {
+    this->buildSSIDGroupMenu();
+    this->changeMenu(&ssidGroupMenu, true);
+  });
+  this->addNodes(&wifiSnifferMenu, "SSID Finder", TFTCYAN,
+                 SCANNERS, [this]() {
+    this->buildSSIDGroupMenu(false, true);
+    this->changeMenu(&ssidGroupMenu, true);
+  });
   this->addNodes(&wifiSnifferMenu, text_table1[42], TFTCYAN, PROBE_SNIFF, [this]() {
     display_obj.clearScreen();
     this->drawStatusBar();
@@ -2757,41 +3113,14 @@ void MenuFunctions::RunSetup()
     this->drawStatusBar();
     wifi_scan_obj.StartScan(WIFI_SCAN_MULTISSID, TFT_ORANGE);
   });
-  this->addNodes(&wifiSnifferMenu, "Scan AP/STA", TFTLIME, BEACON_SNIFF, [this]() {
-    display_obj.clearScreen();
-    this->drawStatusBar();
-    wifi_scan_obj.StartScan(WIFI_SCAN_AP_STA, 0x97e0);
-  });
-  /*this->addNodes(&wifiSnifferMenu, "Fox Hunt", TFTCYAN, PACKET_MONITOR, [this]() {
-    display_obj.clearScreen();
-    this->drawStatusBar();
-    wifi_scan_obj.StartScan(WIFI_SCAN_SIG_STREN, TFT_CYAN);
-  });*/
   this->addNodes(&wifiSnifferMenu, "Fox Hunt", TFTCYAN, SCANNERS, [this]() {
-    foxHuntMenu.list->clear();
-
-    // Bluetooth Fox Hunt Menu
-    foxHuntMenu.parentMenu = &wifiSnifferMenu; // Second Menu is third menu parent
-    this->addNodes(&foxHuntMenu, text09, TFTLIGHTGREY, 0, [this]() {
-      this->changeMenu(foxHuntMenu.parentMenu, true);
-    });
-    
-    for (int i = 0; i < access_points->size(); i++) {
-      AccessPoint access_point = access_points->get(i);
+    for (int index = 0; index < access_points->size(); index++) {
+      AccessPoint access_point = access_points->get(index);
       access_point.selected = false;
-      access_points->set(i, access_point);
-      uint8_t node_color = rssiToMenuColor(access_points->get(i).rssi);
-      String node_name = String(access_points->get(i).rssi) + " " + access_points->get(i).essid;
-      this->addNodes(&foxHuntMenu, node_name.c_str(), node_color, 255, [this, i](){
-        AccessPoint access_point = access_points->get(i);
-        access_point.selected = true;
-        access_points->set(i, access_point);
-        display_obj.clearScreen();
-        this->drawStatusBar();
-        wifi_scan_obj.StartScan(WIFI_SCAN_SIG_STREN, TFT_CYAN);
-      });
+      access_points->set(index, access_point);
     }
-    this->changeMenu(&foxHuntMenu, true);
+    this->buildSSIDGroupMenu(true);
+    this->changeMenu(&ssidGroupMenu, true);
   });
   this->addNodes(&wifiSnifferMenu, "MAC Monitor", TFTMAGENTA, SCANNERS, [this]() {
     display_obj.clearScreen();
@@ -2832,13 +3161,11 @@ void MenuFunctions::RunSetup()
     this->addNodes(&wardrivingMenu, text09, TFTLIGHTGREY, NULL, 0, [this]() {
       this->changeMenu(wardrivingMenu.parentMenu, true);
     });*/
-    if (gps_obj.getGpsModuleStatus()) {
-      this->addNodes(&wifiSnifferMenu, "Wardrive", TFTGREEN, BEACON_SNIFF, [this]() {
-        display_obj.clearScreen();
-        this->drawStatusBar();
-        wifi_scan_obj.StartScan(WIFI_SCAN_WAR_DRIVE, TFT_GREEN);
-      });
-    }
+    this->addNodes(&wifiSnifferMenu, "Wardrive", TFTGREEN, BEACON_SNIFF, [this]() {
+      display_obj.clearScreen();
+      this->drawStatusBar();
+      wifi_scan_obj.StartScan(WIFI_SCAN_WAR_DRIVE, TFT_GREEN);
+    });
   #endif
   /*#ifdef HAS_GPS
     if (gps_obj.getGpsModuleStatus()) {
@@ -2938,6 +3265,19 @@ void MenuFunctions::RunSetup()
     display_obj.clearScreen();
     this->drawStatusBar();
     wifi_scan_obj.StartScan(WIFI_ATTACK_DEAUTH_TARGETED, TFT_ORANGE);
+  });
+
+  this->addNodes(&wifiAttackMenu, "SSID Beacon Clone", TFTMAGENTA,
+                 BEACON_LIST, [this]() {
+    display_obj.clearScreen();
+    this->drawStatusBar();
+    wifi_scan_obj.StartScan(WIFI_ATTACK_SSID_GROUP_CLONE, TFT_MAGENTA);
+  });
+  this->addNodes(&wifiAttackMenu, "SSID Group Deauth", TFTRED,
+                 DEAUTH_SNIFF, [this]() {
+    display_obj.clearScreen();
+    this->drawStatusBar();
+    wifi_scan_obj.StartScan(WIFI_ATTACK_DEAUTH, TFT_RED);
   });
 
   #ifdef MARAUDER_MINI_V3
@@ -3188,77 +3528,6 @@ void MenuFunctions::RunSetup()
       this->changeMenu(htmlMenu.parentMenu, true);
     });
 
-    // Select APs on Mini
-    this->addNodes(&wifiGeneralMenu, "Select APs", TFTNAVY, KEYBOARD_ICO, [this](){
-      wifiAPMenu.parentMenu = &wifiGeneralMenu;
-      // Add the back button
-      wifiAPMenu.list->clear();
-        this->addNodes(&wifiAPMenu, text09, TFTLIGHTGREY, 0, [this]() {
-        this->changeMenu(wifiAPMenu.parentMenu, true);
-      });
-
-      this->addNodes(&wifiAPMenu, "Select ALL", TFTGREEN, 255, [this](){
-
-        for (int x = 0; x < access_points->size(); x++) {
-          AccessPoint new_ap = access_points->get(x);
-          new_ap.selected = !access_points->get(x).selected;
-          access_points->set(x, new_ap);
-
-          MenuNode new_node = current_menu->list->get(x + 2);
-          new_node.selected = !current_menu->list->get(x + 2).selected;
-          current_menu->list->set(x + 2, new_node);
-        }
-
-        this->changeMenu(current_menu, true);
-
-      });
-
-      // Populate the menu with buttons
-      for (int i = 0; i < access_points->size(); i++) {
-        // This is the menu node
-        this->addNodes(&wifiAPMenu, access_points->get(i).essid.c_str(), TFTCYAN, 255, [this, i](){
-        AccessPoint new_ap = access_points->get(i);
-        new_ap.selected = !access_points->get(i).selected;
-
-        // Change selection status of menu node
-        MenuNode new_node = current_menu->list->get(i + 2);
-        new_node.selected = !current_menu->list->get(i + 2).selected;
-        current_menu->list->set(i + 2, new_node);
-
-        access_points->set(i, new_ap);
-        }, access_points->get(i).selected);
-      }
-      this->changeMenu(&wifiAPMenu, true);
-    });
-
-    // Keep target selection immediately below Back in WiFi General.
-    wifiGeneralMenu.list->add(1, wifiGeneralMenu.list->pop());
-
-    this->addNodes(&wifiGeneralMenu, "View AP Info", TFTCYAN, KEYBOARD_ICO, [this](){
-      wifiAPMenu.parentMenu = &wifiGeneralMenu;
-      
-      // Add the back button
-      wifiAPMenu.list->clear();
-        this->addNodes(&wifiAPMenu, text09, TFTLIGHTGREY, 0, [this]() {
-        this->changeMenu(wifiAPMenu.parentMenu, true);
-      });
-
-      // Populate the menu with buttons
-      for (int i = 0; i < access_points->size(); i++) {
-        // This is the menu node
-        this->addNodes(&wifiAPMenu, access_points->get(i).essid.c_str(), TFTCYAN, 255, [this, i](){
-          this->changeMenu(&apInfoMenu, true);
-          wifi_scan_obj.RunAPInfo(i);
-        });
-      }
-      this->changeMenu(&wifiAPMenu, true);
-    });
-
-    apInfoMenu.parentMenu = &wifiAPMenu;
-    this->addNodes(&apInfoMenu, text09, TFTLIGHTGREY, 0, [this]() {
-      this->changeMenu(apInfoMenu.parentMenu, true);
-    });
-
     wifiAPMenu.parentMenu = &wifiGeneralMenu;
     this->addNodes(&wifiAPMenu, text09, TFTLIGHTGREY, 0, [this]() {
       this->changeMenu(wifiAPMenu.parentMenu, true);
@@ -3339,7 +3608,8 @@ void MenuFunctions::RunSetup()
       this->changeMenu(&wifiAPMenu, true);
     });
 
-    wifiGeneralMenu.list->add(2, wifiGeneralMenu.list->pop());
+    // Keep station selection immediately below Back in WiFi General.
+    wifiGeneralMenu.list->add(1, wifiGeneralMenu.list->pop());
 
     this->addNodes(&wifiGeneralMenu, "Join WiFi", TFTWHITE, KEYBOARD_ICO, [this](){
 
@@ -4268,7 +4538,7 @@ void MenuFunctions::RunSetup()
     this->changeMenu(&saveFileMenu, true);
   });
 
-  #ifndef HAS_MINI_SCREEN
+  #if !defined(HAS_MINI_SCREEN) || defined(MARAUDER_MINI_V3)
     this->addNodes(&deviceMenu, "Brightness", TFTYELLOW, BRIGHTNESS, [this]() {
       this->brightnessMode();
     });
@@ -4365,8 +4635,7 @@ void MenuFunctions::RunSetup()
 
   // GPS Menu
   #ifdef HAS_GPS
-    if (gps_obj.getGpsModuleStatus()) {
-      gpsMenu.parentMenu = &mainMenu; // Main Menu is second menu parent
+    gpsMenu.parentMenu = &mainMenu; // Main Menu is second menu parent
 
       this->addNodes(&gpsMenu, text09, TFTLIGHTGREY, 0, [this]() {
         this->changeMenu(gpsMenu.parentMenu, true);
@@ -4424,7 +4693,6 @@ void MenuFunctions::RunSetup()
         wifi_scan_obj.StartScan(WIFI_SCAN_OFF);
         this->changeMenu(gpsInfoMenu.parentMenu, true);
       }); 
-    }
   #endif
 
   // Settings menu
@@ -5461,21 +5729,15 @@ void MenuFunctions::displayCurrentMenu(int start_index)
 // Hold top/bottom zone 1.5s to enter. TAP TOP = brighter, TAP BOTTOM = dimmer.
 // TAP MIDDLE or wait 3s = save & exit.
 // ============================================================
-#ifndef HAS_MINI_SCREEN
+#if !defined(HAS_MINI_SCREEN)
   void MenuFunctions::brightnessMode() {
     extern void brightnessSave(uint8_t level);
+    extern void brightnessPreview(uint8_t level);
     extern uint8_t getBrightnessLevel();
 
     const uint8_t levels[] = {26, 51, 77, 102, 128, 153, 179, 204, 230, 255};
     const uint8_t numLevels = 10;
     uint8_t level = getBrightnessLevel();
-
-    // LEDC write compatibility (2.x vs 3.x board package)
-    #if ESP_ARDUINO_VERSION_MAJOR >= 3
-      #define BL_PREVIEW(duty) ledcWrite(TFT_BL, (duty))
-    #else
-      #define BL_PREVIEW(duty) ledcWrite(0, (duty))
-    #endif
 
     display_obj.tft.fillScreen(TFT_BLACK);
     display_obj.tft.setTextColor(TFT_CYAN, TFT_BLACK);
@@ -5520,13 +5782,13 @@ void MenuFunctions::displayCurrentMenu(int start_index)
         if (ty < zoneUp) {
           if (level < numLevels - 1) {
             level++;
-            BL_PREVIEW(levels[level]);
+            brightnessPreview(level);
             drawBar();
           }
         } else if (ty >= zoneDown) {
           if (level > 0) {
             level--;
-            BL_PREVIEW(levels[level]);
+            brightnessPreview(level);
             drawBar();
           }
         } else {
@@ -5539,7 +5801,93 @@ void MenuFunctions::displayCurrentMenu(int start_index)
       delay(30);
     }
 
-    #undef BL_PREVIEW
+    this->changeMenu(current_menu, true);
+  }
+#elif defined(MARAUDER_MINI_V3)
+  void MenuFunctions::brightnessMode() {
+    extern void brightnessPreview(uint8_t level);
+    extern void brightnessSave(uint8_t level);
+    extern uint8_t getBrightnessLevel();
+
+    const uint8_t levels[] = {26, 51, 77, 102, 128,
+                              153, 179, 204, 230, 255};
+    const uint8_t numLevels = sizeof(levels) / sizeof(levels[0]);
+    uint8_t level = min(getBrightnessLevel(),
+                        static_cast<uint8_t>(numLevels - 1));
+
+    display_obj.tft.fillScreen(TFT_BLACK);
+    display_obj.tft.setFreeFont(NULL);
+    display_obj.tft.setTextSize(1);
+    display_obj.tft.setTextWrap(false);
+    display_obj.tft.setTextColor(MINI_UI_ACCENT, TFT_BLACK);
+    display_obj.tft.drawCentreString("BRIGHTNESS", TFT_WIDTH / 2, 8, 1);
+
+    auto drawLevel = [&]() {
+      const int16_t barX = 12;
+      const int16_t barY = 31;
+      const int16_t barW = TFT_WIDTH - 24;
+      const int16_t barH = 20;
+      const int16_t fillW =
+          (barW - 4) * static_cast<int16_t>(level + 1) / numLevels;
+
+      display_obj.tft.fillRect(0, 27, TFT_WIDTH, 54, TFT_BLACK);
+      display_obj.tft.drawRoundRect(barX, barY, barW, barH, 3,
+                                    MINI_UI_BORDER);
+      display_obj.tft.fillRoundRect(barX + 2, barY + 2, fillW, barH - 4,
+                                    2, MINI_UI_ACCENT);
+      display_obj.tft.setTextColor(TFT_WHITE, TFT_BLACK);
+      const String value = String(levels[level] * 100 / 255) + "%  " +
+                           String(level + 1) + "/" + String(numLevels);
+      display_obj.tft.drawCentreString(value, TFT_WIDTH / 2, 60, 2);
+    };
+
+    display_obj.tft.setTextColor(MINI_UI_TEXT, TFT_BLACK);
+    display_obj.tft.drawCentreString("UP/RIGHT: BRIGHTER", TFT_WIDTH / 2,
+                                     89, 1);
+    display_obj.tft.drawCentreString("DOWN/LEFT: DIMMER", TFT_WIDTH / 2,
+                                     102, 1);
+    display_obj.tft.setTextColor(TFT_GREEN, TFT_BLACK);
+    display_obj.tft.drawCentreString("CENTER: SAVE", TFT_WIDTH / 2, 115, 1);
+    drawLevel();
+
+    // The center press that opened this screen must be released before it can
+    // be accepted as Save.
+    while (miniMenuButtonDown(c_btn)) {
+      c_btn.justPressed();
+      delay(10);
+    }
+    c_btn.justPressed();
+
+    while (true) {
+      bool changed = false;
+      if (u_btn.justPressed() || r_btn.justPressed()) {
+        if (level < numLevels - 1) {
+          level++;
+          changed = true;
+        }
+      }
+      else if (d_btn.justPressed() || l_btn.justPressed()) {
+        if (level > 0) {
+          level--;
+          changed = true;
+        }
+      }
+      else if (c_btn.justPressed()) {
+        brightnessSave(level);
+        while (miniMenuButtonDown(c_btn)) {
+          c_btn.justPressed();
+          delay(10);
+        }
+        break;
+      }
+
+      if (changed) {
+        brightnessPreview(level);
+        drawLevel();
+      }
+      delay(20);
+    }
+
     this->changeMenu(current_menu, true);
   }
 #endif

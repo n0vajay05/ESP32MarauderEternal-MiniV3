@@ -44,6 +44,8 @@ class GpsInterface {
     bool getFixStatus();
     String getFixStatusAsString();
     bool getGpsModuleStatus();
+    uint32_t getBaudRate();
+    uint32_t getLastSentenceAgeMs();
     String getLat();
     String getLon();
     int32_t getLatInt();
@@ -105,6 +107,12 @@ class GpsInterface {
     bool good_fix = false;
     char nav_system='\0';
     uint8_t num_sats = 0;
+    uint32_t gps_baud = 0;
+    uint32_t listening_baud = 0;
+    uint32_t last_sentence_ms = 0;
+    uint32_t last_fix_sentence_ms = 0;
+    uint32_t last_baud_switch_ms = 0;
+    uint8_t recovery_baud_index = 0;
 
     type_t type_flag = GPSTYPE_NATIVE;
 
@@ -121,9 +129,10 @@ class GpsInterface {
     void flush_queue_nmea();
     String dt_string_from_gps();
     void setGPSInfo();
+    void handleCompletedSentence();
+    void listenAtBaud(uint32_t baud);
     bool probeBaud(uint32_t baud);
-    void setGpsTo115200From9600();
-    uint32_t initGpsBaudAndForce115200();
+    uint32_t detectGpsBaud();
 };
 
 #endif

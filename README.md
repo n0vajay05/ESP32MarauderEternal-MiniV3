@@ -27,6 +27,56 @@ Marauder code base by JustCallMeKoKo and modified for the Marauder Mini V3 only.
 The source contains a compile-time guard that rejects non-ESP32-C5 board
 targets. `MARAUDER_MINI_V3` is also fixed by the project configuration.
 
+## GPS status and recovery
+
+The GPS indicator at the upper left stays hidden while searching and appears
+solid green after a valid position fix. The **GPS > GPS Data** screen reports
+whether checksum-valid NMEA traffic is active, the detected UART baud, and the
+age of the latest sentence. On the Mini V3 GPS Data screen, press **Down** or
+**Right** to highlight and scroll the complete D/T value. Press **Up** or
+**Left** to clear the highlight; **Center** returns to the GPS menu.
+
+The receiver starts passively without vendor-specific persistent configuration
+or reset commands. Firmware detects 4800, 9600, 19200, 38400, 57600, and
+115200 baud, keeps scanning if the receiver starts late, and clears stale fixes.
+**NMEA Active** without a fix points to antenna/RF acquisition or sky view;
+**NMEA Searching** points to receiver power, UART wiring, or NMEA output.
+
+## Brightness control
+
+Open **Device > Brightness** to adjust the Mini V3 backlight. Use **Up** or
+**Right** to make the display brighter, **Down** or **Left** to dim it, and
+**Center** to save and return. The selected level is retained across restarts.
+
+## SSID groups
+
+Use **WiFi > WiFi Sniffers > Scan SSIDs** to discover AP radios and
+group BSSIDs that advertise the same exact SSID. Open **WiFi > WiFi Sniffers >
+Select SSIDs**, choose an SSID, then toggle individual APs by BSSID. Each AP row
+starts with its last-scanned RSSI in dBm, followed by BSSID and channel, and the
+AP rows are sorted from strongest to weakest signal. SSID rows also show the
+strongest AP RSSI at the left and use the same strongest-to-weakest order.
+**Select All** at the bottom selects or clears the entire SSID group. Selected
+rows remain green while the navigation cursor keeps its accent highlight. The
+**SSID Beacon Clone** and **SSID Group Deauth** entries under WiFi Attacks
+operate on the resulting AP selections. The ESP32-C5 services different
+channels sequentially rather than simultaneously.
+
+**WiFi > WiFi Sniffers > Fox Hunt** uses the same SSID and AP hierarchy. Select
+one AP to reveal **Start Fox Hunt** at the bottom of its AP list. Fox Hunt does
+not offer **Select All** and rejects a second AP until the first is deselected.
+
+**WiFi > WiFi Sniffers > SSID Finder** uses that SSID hierarchy for passive
+proximity finding. After choosing an SSID, it scans only the channels used by
+that group, filters RSSI changes, and automatically follows the strongest AP.
+A stronger AP must remain at least 6 dB ahead for two complete channel cycles
+before Finder switches targets, which avoids rapid bouncing between similar
+signals. The bullseye shows proximity rather than direction: move the device
+and watch the ring, dBm value, and signal trend. Press **Center** to lock or
+resume automatic target selection, **Right** to mark the current AP found (or
+reset after all are found), and **Left** to exit. The display tracks progress as
+**Found x/y** without changing the AP selections used by WiFi Attacks.
+
 ## Screenshots
 <img width="128" height="128" alt="image" src="https://github.com/user-attachments/assets/f176da9a-eafb-42ac-afda-aac6455f8962" />
 <img width="128" height="128" alt="image" src="https://github.com/user-attachments/assets/5ef02b66-e307-4d84-ac74-c161e486a6cf" /> 

@@ -8,6 +8,107 @@
   #include "Switches.h"
   extern Switches u_btn;
   extern Switches d_btn;
+  extern Switches l_btn;
+  extern Switches r_btn;
+#endif
+
+namespace {
+constexpr uint16_t SSID_FINDER_CHANNEL_DWELL_MS = 300;
+constexpr uint16_t SSID_FINDER_UI_REFRESH_MS = 150;
+constexpr uint16_t SSID_FINDER_TREND_INTERVAL_MS = 1500;
+constexpr uint16_t SSID_FINDER_SWITCH_NOTICE_MS = 1200;
+constexpr int8_t SSID_FINDER_SWITCH_MARGIN_DB = 6;
+constexpr int8_t SSID_FINDER_TREND_MARGIN_DB = 3;
+constexpr uint8_t SSID_FINDER_SWITCH_CYCLES = 2;
+
+#ifdef HAS_SCREEN
+struct SSIDFinderUiSnapshot {
+  String ssid;
+  String metadata;
+  String bssid;
+  String measurement;
+  String progress;
+  String controls;
+  int8_t rssi = -128;
+  bool fresh = false;
+  bool all_found = false;
+};
+
+uint16_t ssidFinderSignalColor(int8_t rssi, bool fresh) {
+  if (!fresh)
+    return TFT_DARKGREY;
+  if (rssi >= -50)
+    return TFT_GREEN;
+  if (rssi >= -65)
+    return TFT_YELLOW;
+  if (rssi >= -75)
+    return TFT_ORANGE;
+  return TFT_RED;
+}
+
+template <typename Surface>
+void renderSSIDFinderSurface(Surface& surface,
+                             const SSIDFinderUiSnapshot& snapshot) {
+  surface.fillRect(0, 0, TFT_WIDTH, TFT_HEIGHT, TFT_BLACK);
+  surface.setFreeFont(NULL);
+  surface.setTextFont(1);
+  surface.setTextSize(1);
+  surface.setTextWrap(false);
+
+  surface.setTextColor(TFT_CYAN, TFT_BLACK);
+  surface.drawCentreString("SSID FINDER", TFT_WIDTH / 2, 1, 1);
+  surface.setTextColor(TFT_WHITE, TFT_BLACK);
+  surface.drawCentreString(snapshot.ssid, TFT_WIDTH / 2, 10, 1);
+  surface.setTextColor(TFT_LIGHTGREY, TFT_BLACK);
+  surface.drawCentreString(snapshot.metadata, TFT_WIDTH / 2, 19, 1);
+
+  constexpr int16_t center_x = TFT_WIDTH / 2;
+  constexpr int16_t center_y = 61;
+  constexpr int16_t rings[] = {10, 19, 28, 36};
+  for (const int16_t radius : rings)
+    surface.drawCircle(center_x, center_y, radius, 0x4208);
+  surface.drawFastHLine(center_x - 39, center_y, 79, 0x2104);
+  surface.drawFastVLine(center_x, center_y - 39, 79, 0x2104);
+
+  if (!snapshot.all_found) {
+    const int16_t clamped_rssi = max(-85, min(-35, (int)snapshot.rssi));
+    const int16_t radius = 7 + ((-35 - clamped_rssi) * 29) / 50;
+    const uint16_t signal_color =
+        ssidFinderSignalColor(snapshot.rssi, snapshot.fresh);
+    surface.drawCircle(center_x, center_y, radius, signal_color);
+    if (radius > 7)
+      surface.drawCircle(center_x, center_y, radius - 1, signal_color);
+    surface.fillCircle(center_x, center_y, 2, TFT_CYAN);
+    surface.fillRect(35, center_y - 6, 58, 12, TFT_BLACK);
+    surface.setTextColor(signal_color, TFT_BLACK);
+    surface.drawCentreString(snapshot.measurement, center_x,
+                             center_y - 4, 1);
+  }
+  else {
+    surface.fillRect(31, center_y - 6, 66, 12, TFT_BLACK);
+    surface.setTextColor(TFT_GREEN, TFT_BLACK);
+    surface.drawCentreString("ALL FOUND", center_x, center_y - 4, 1);
+  }
+
+  surface.setTextColor(TFT_LIGHTGREY, TFT_BLACK);
+  surface.drawCentreString(snapshot.bssid, TFT_WIDTH / 2, 98, 1);
+  surface.setTextColor(TFT_WHITE, TFT_BLACK);
+  surface.drawCentreString(snapshot.progress, TFT_WIDTH / 2, 107, 1);
+  surface.setTextColor(TFT_CYAN, TFT_BLACK);
+  surface.drawCentreString(snapshot.controls, TFT_WIDTH / 2, 118, 1);
+}
+#endif
+}  // namespace
+
+#if defined(MARAUDER_MINI_V3) && defined(HAS_GPS)
+namespace {
+constexpr uint16_t MINI_GPS_DATETIME_STEP_MS = 40;
+constexpr uint16_t MINI_GPS_DATETIME_PAUSE_MS = 900;
+constexpr uint16_t MINI_GPS_DATETIME_SELECTED_BG = 0x733F;
+constexpr int16_t MINI_GPS_DATETIME_ROW_HEIGHT = 9;
+constexpr int16_t MINI_GPS_DATETIME_VIEWPORT_X = 2;
+constexpr int16_t MINI_GPS_DATETIME_VIEWPORT_WIDTH = TFT_WIDTH - 4;
+}
 #endif
 
 #ifdef HAS_BT
@@ -2081,8 +2182,12 @@ int WiFiScan::clearList(uint8_t list_type) {
 
   if (list_type == CLEAR_APS) {
     num_cleared = access_points->size();
-    while (access_points->size() > 0)
+    while (access_points->size() > 0) {
+      AccessPoint access_point = access_points->get(0);
+      if (access_point.stations != nullptr)
+        delete access_point.stations;
       access_points->remove(0);
+    }
     return num_cleared;
   }
   else if (list_type == CLEAR_IPS) {
@@ -2420,9 +2525,312 @@ void WiFiScan::setCameraDeauthTargets(
   }
 }
 
+void WiFiScan::prepareSSIDGroupScan() {
+  this->ssid_group_scan_pending = true;
+}
+
+void WiFiScan::resetSSIDFinder() {
+  this->ssid_finder_name = "";
+  this->ssid_finder_aps.clear();
+  this->ssid_finder_channels.clear();
+  this->ssid_finder_active = -1;
+  this->ssid_finder_challenger = -1;
+  this->ssid_finder_challenger_cycles = 0;
+  this->ssid_finder_channel_cursor = 0;
+  this->ssid_finder_locked = false;
+  this->ssid_finder_trend = 0;
+  this->ssid_finder_trend_baseline = -128;
+  this->ssid_finder_next_trend_ms = 0;
+  this->ssid_finder_switch_notice_until = 0;
+
+  #ifdef HAS_SCREEN
+    if (this->ssid_finder_sprite != nullptr) {
+      this->ssid_finder_sprite->deleteSprite();
+      delete this->ssid_finder_sprite;
+      this->ssid_finder_sprite = nullptr;
+    }
+  #endif
+}
+
+int8_t WiFiScan::ssidFinderRssi(int16_t finder_index) const {
+  if (finder_index < 0 ||
+      finder_index >= static_cast<int16_t>(this->ssid_finder_aps.size()))
+    return -128;
+  const int16_t q4 = this->ssid_finder_aps[finder_index].filtered_rssi_q4;
+  return static_cast<int8_t>((q4 + (q4 >= 0 ? 2 : -2)) / 4);
+}
+
+uint32_t WiFiScan::ssidFinderFreshWindowMs() const {
+  const uint32_t channel_count = this->ssid_finder_channels.empty()
+                                     ? 1
+                                     : this->ssid_finder_channels.size();
+  const uint32_t full_cycle_ms =
+      channel_count * SSID_FINDER_CHANNEL_DWELL_MS;
+  return max(static_cast<uint32_t>(2000),
+             (full_cycle_ms * 2) + SSID_FINDER_CHANNEL_DWELL_MS);
+}
+
+bool WiFiScan::prepareSSIDFinder(const String& ssid_name) {
+  this->resetSSIDFinder();
+  this->ssid_finder_name = ssid_name;
+  const uint32_t now = millis();
+
+  for (int index = 0; index < access_points->size(); index++) {
+    const AccessPoint access_point = access_points->get(index);
+    if (access_point.essid != ssid_name || access_point.channel == 0)
+      continue;
+
+    SSIDFinderAP finder_ap;
+    finder_ap.ap_index = index;
+    memcpy(finder_ap.bssid, access_point.bssid, sizeof(finder_ap.bssid));
+    finder_ap.channel = access_point.channel;
+    finder_ap.raw_rssi = access_point.rssi;
+    finder_ap.filtered_rssi_q4 = access_point.rssi * 4;
+    finder_ap.samples[0] = access_point.rssi;
+    finder_ap.sample_count = 1;
+    finder_ap.sample_cursor = 1;
+    finder_ap.last_seen_ms = now;
+    this->ssid_finder_aps.push_back(finder_ap);
+  }
+
+  std::sort(this->ssid_finder_aps.begin(), this->ssid_finder_aps.end(),
+            [](const SSIDFinderAP& left, const SSIDFinderAP& right) {
+    if (left.filtered_rssi_q4 != right.filtered_rssi_q4)
+      return left.filtered_rssi_q4 > right.filtered_rssi_q4;
+    return memcmp(left.bssid, right.bssid, sizeof(left.bssid)) < 0;
+  });
+
+  for (const SSIDFinderAP& finder_ap : this->ssid_finder_aps) {
+    bool channel_exists = false;
+    for (const uint8_t channel : this->ssid_finder_channels) {
+      if (channel == finder_ap.channel) {
+        channel_exists = true;
+        break;
+      }
+    }
+    if (!channel_exists)
+      this->ssid_finder_channels.push_back(finder_ap.channel);
+  }
+
+  if (this->ssid_finder_aps.empty() || this->ssid_finder_channels.empty()) {
+    this->resetSSIDFinder();
+    return false;
+  }
+
+  this->ssid_finder_active = 0;
+  this->ssid_finder_trend_baseline = this->ssidFinderRssi(0);
+  this->ssid_finder_next_trend_ms = now + SSID_FINDER_TREND_INTERVAL_MS;
+  Serial.printf("[SSID Finder] Tracking %u AP(s) on %u channel(s) for %s\n",
+                static_cast<unsigned>(this->ssid_finder_aps.size()),
+                static_cast<unsigned>(this->ssid_finder_channels.size()),
+                ssid_name.length() > 0 ? ssid_name.c_str() : "<Hidden SSID>");
+  return true;
+}
+
+void WiFiScan::recordSSIDFinderPacket(const uint8_t bssid[6], int8_t rssi,
+                                      uint32_t current_time) {
+  for (SSIDFinderAP& finder_ap : this->ssid_finder_aps) {
+    if (memcmp(finder_ap.bssid, bssid, sizeof(finder_ap.bssid)) != 0)
+      continue;
+
+    finder_ap.raw_rssi = rssi;
+    finder_ap.samples[finder_ap.sample_cursor] = rssi;
+    finder_ap.sample_cursor =
+        (finder_ap.sample_cursor + 1) % SSID_FINDER_SAMPLE_WINDOW;
+    if (finder_ap.sample_count < SSID_FINDER_SAMPLE_WINDOW)
+      finder_ap.sample_count++;
+
+    int8_t sorted_samples[SSID_FINDER_SAMPLE_WINDOW] = {};
+    for (uint8_t index = 0; index < finder_ap.sample_count; index++)
+      sorted_samples[index] = finder_ap.samples[index];
+    std::sort(sorted_samples,
+              sorted_samples + finder_ap.sample_count);
+    const int8_t median = sorted_samples[finder_ap.sample_count / 2];
+    const int16_t median_q4 = median * 4;
+    if (finder_ap.sample_count <= 1)
+      finder_ap.filtered_rssi_q4 = median_q4;
+    else
+      finder_ap.filtered_rssi_q4 =
+          ((finder_ap.filtered_rssi_q4 * 3) + median_q4) / 4;
+    finder_ap.last_seen_ms = current_time;
+
+    if (finder_ap.ap_index >= 0 &&
+        finder_ap.ap_index < access_points->size()) {
+      AccessPoint access_point = access_points->get(finder_ap.ap_index);
+      if (memcmp(access_point.bssid, finder_ap.bssid,
+                 sizeof(finder_ap.bssid)) == 0) {
+        access_point.rssi = this->ssidFinderRssi(
+            static_cast<int16_t>(&finder_ap - this->ssid_finder_aps.data()));
+        access_point.last_seen_ms = current_time;
+        access_points->set(finder_ap.ap_index, access_point);
+      }
+    }
+    return;
+  }
+}
+
+void WiFiScan::evaluateSSIDFinderTarget(uint32_t current_time,
+                                        bool require_hysteresis) {
+  if (this->ssid_finder_aps.empty()) {
+    this->ssid_finder_active = -1;
+    return;
+  }
+
+  const uint32_t fresh_window = this->ssidFinderFreshWindowMs();
+  int16_t strongest_fresh = -1;
+  int16_t strongest_any = -1;
+  for (int16_t index = 0;
+       index < static_cast<int16_t>(this->ssid_finder_aps.size()); index++) {
+    const SSIDFinderAP& finder_ap = this->ssid_finder_aps[index];
+    if (finder_ap.found)
+      continue;
+    if (strongest_any < 0 ||
+        this->ssidFinderRssi(index) > this->ssidFinderRssi(strongest_any))
+      strongest_any = index;
+    if (current_time - finder_ap.last_seen_ms <= fresh_window &&
+        (strongest_fresh < 0 ||
+         this->ssidFinderRssi(index) >
+             this->ssidFinderRssi(strongest_fresh)))
+      strongest_fresh = index;
+  }
+
+  if (strongest_any < 0) {
+    this->ssid_finder_active = -1;
+    this->ssid_finder_challenger = -1;
+    this->ssid_finder_challenger_cycles = 0;
+    return;
+  }
+
+  const bool active_valid =
+      this->ssid_finder_active >= 0 &&
+      this->ssid_finder_active <
+          static_cast<int16_t>(this->ssid_finder_aps.size()) &&
+      !this->ssid_finder_aps[this->ssid_finder_active].found;
+  if (!active_valid) {
+    this->ssid_finder_active =
+        strongest_fresh >= 0 ? strongest_fresh : strongest_any;
+    this->ssid_finder_challenger = -1;
+    this->ssid_finder_challenger_cycles = 0;
+    this->ssid_finder_trend = 0;
+    this->ssid_finder_trend_baseline =
+        this->ssidFinderRssi(this->ssid_finder_active);
+    this->ssid_finder_next_trend_ms =
+        current_time + SSID_FINDER_TREND_INTERVAL_MS;
+    return;
+  }
+
+  if (this->ssid_finder_locked || strongest_fresh < 0)
+    return;
+
+  const bool active_fresh =
+      current_time -
+          this->ssid_finder_aps[this->ssid_finder_active].last_seen_ms <=
+      fresh_window;
+  if (!active_fresh) {
+    this->ssid_finder_active = strongest_fresh;
+    this->ssid_finder_challenger = -1;
+    this->ssid_finder_challenger_cycles = 0;
+    this->ssid_finder_switch_notice_until =
+        current_time + SSID_FINDER_SWITCH_NOTICE_MS;
+    this->ssid_finder_trend = 0;
+    this->ssid_finder_trend_baseline =
+        this->ssidFinderRssi(this->ssid_finder_active);
+    return;
+  }
+
+  if (strongest_fresh == this->ssid_finder_active ||
+      this->ssidFinderRssi(strongest_fresh) <
+          this->ssidFinderRssi(this->ssid_finder_active) +
+              SSID_FINDER_SWITCH_MARGIN_DB) {
+    this->ssid_finder_challenger = -1;
+    this->ssid_finder_challenger_cycles = 0;
+    return;
+  }
+
+  if (!require_hysteresis) {
+    this->ssid_finder_challenger_cycles = SSID_FINDER_SWITCH_CYCLES;
+  }
+  else if (this->ssid_finder_challenger == strongest_fresh) {
+    this->ssid_finder_challenger_cycles++;
+  }
+  else {
+    this->ssid_finder_challenger = strongest_fresh;
+    this->ssid_finder_challenger_cycles = 1;
+  }
+
+  if (this->ssid_finder_challenger_cycles < SSID_FINDER_SWITCH_CYCLES)
+    return;
+
+  const int16_t previous_target = this->ssid_finder_active;
+  this->ssid_finder_active = strongest_fresh;
+  this->ssid_finder_challenger = -1;
+  this->ssid_finder_challenger_cycles = 0;
+  this->ssid_finder_switch_notice_until =
+      current_time + SSID_FINDER_SWITCH_NOTICE_MS;
+  this->ssid_finder_trend = 0;
+  this->ssid_finder_trend_baseline =
+      this->ssidFinderRssi(this->ssid_finder_active);
+  this->ssid_finder_next_trend_ms =
+      current_time + SSID_FINDER_TREND_INTERVAL_MS;
+  Serial.printf("[SSID Finder] Switched AP %d -> %d (%d dBm)\n",
+                previous_target + 1, this->ssid_finder_active + 1,
+                this->ssidFinderRssi(this->ssid_finder_active));
+}
+
+void WiFiScan::toggleSSIDFinderLock() {
+  if (this->currentScanMode != WIFI_SCAN_SSID_FINDER ||
+      this->ssid_finder_active < 0)
+    return;
+  this->ssid_finder_locked = !this->ssid_finder_locked;
+  this->ssid_finder_challenger = -1;
+  this->ssid_finder_challenger_cycles = 0;
+  this->drawSSIDFinder(millis());
+}
+
+void WiFiScan::markSSIDFinderFound() {
+  if (this->currentScanMode != WIFI_SCAN_SSID_FINDER)
+    return;
+
+  uint16_t found_count = 0;
+  for (const SSIDFinderAP& finder_ap : this->ssid_finder_aps) {
+    if (finder_ap.found)
+      found_count++;
+  }
+
+  if (!this->ssid_finder_aps.empty() &&
+      found_count == this->ssid_finder_aps.size()) {
+    for (SSIDFinderAP& finder_ap : this->ssid_finder_aps)
+      finder_ap.found = false;
+    this->ssid_finder_active = -1;
+    this->ssid_finder_locked = false;
+    this->evaluateSSIDFinderTarget(millis(), false);
+    this->drawSSIDFinder(millis());
+    return;
+  }
+
+  if (this->ssid_finder_active < 0 ||
+      this->ssid_finder_active >=
+          static_cast<int16_t>(this->ssid_finder_aps.size()))
+    return;
+
+  this->ssid_finder_aps[this->ssid_finder_active].found = true;
+  this->ssid_finder_active = -1;
+  this->ssid_finder_locked = false;
+  this->ssid_finder_challenger = -1;
+  this->ssid_finder_challenger_cycles = 0;
+  this->evaluateSSIDFinderTarget(millis(), false);
+  this->drawSSIDFinder(millis());
+}
+
 // Function to prepare to run a specific scan
 void WiFiScan::StartScan(uint8_t scan_mode, uint16_t color) {  
   this->initWiFi(scan_mode);
+  #if defined(MARAUDER_MINI_V3) && defined(HAS_GPS)
+    if (scan_mode == WIFI_SCAN_GPS_DATA)
+      this->resetMiniGpsDateTime(millis(), true);
+    else
+      this->gps_datetime_row_y = -1;
+  #endif
   if (scan_mode == WIFI_SCAN_WAR_DRIVE || scan_mode == BT_SCAN_FLOCK)
     this->resetFlockTracking();
   if (scan_mode == WIFI_SCAN_OFF) {
@@ -2454,8 +2862,12 @@ void WiFiScan::StartScan(uint8_t scan_mode, uint16_t color) {
     RunEapolScan(scan_mode, color);
   else if (scan_mode == WIFI_SCAN_ACTIVE_LIST_EAPOL)
     RunEapolScan(scan_mode, color);
-  else if (scan_mode == WIFI_SCAN_AP)
-    RunBeaconScan(scan_mode, color);
+  else if (scan_mode == WIFI_SCAN_AP) {
+    if (this->ssid_group_scan_pending)
+      RunAPScan(scan_mode, color);
+    else
+      RunBeaconScan(scan_mode, color);
+  }
   else if (scan_mode == WIFI_SCAN_WAR_DRIVE) {
     #ifdef HAS_BT
       RunBluetoothScan(scan_mode, color);
@@ -2464,6 +2876,8 @@ void WiFiScan::StartScan(uint8_t scan_mode, uint16_t color) {
   }
   else if (scan_mode == WIFI_SCAN_SIG_STREN)
     RunRawScan(scan_mode, color);    
+  else if (scan_mode == WIFI_SCAN_SSID_FINDER)
+    RunSSIDFinder(scan_mode, color);
   else if (scan_mode == WIFI_SCAN_RAW_CAPTURE)
     RunRawScan(scan_mode, color);
   else if (scan_mode == WIFI_SCAN_AP_STA)
@@ -2526,6 +2940,8 @@ void WiFiScan::StartScan(uint8_t scan_mode, uint16_t color) {
     this->startWiFiAttacks(scan_mode, color, "Sleep Targeted");
   else if (scan_mode == WIFI_ATTACK_AP_SPAM)
     this->startWiFiAttacks(scan_mode, color, " AP Beacon Spam ");
+  else if (scan_mode == WIFI_ATTACK_SSID_GROUP_CLONE)
+    this->startWiFiAttacks(scan_mode, color, "SSID Beacon Clone");
   else if ((scan_mode == BT_SCAN_ALL) ||
           (scan_mode == BT_SCAN_ADVERTISEMENT_CAPTURE) ||
           (scan_mode == BT_SCAN_FOX_HUNT) ||
@@ -2640,9 +3056,34 @@ void WiFiScan::setLEDMode(int mode) {
   }
 }
 
-void WiFiScan::displayTargetFilter() {
+void WiFiScan::displayTargetFilter(uint8_t scan_mode) {
   #ifdef HAS_SCREEN
-    if (this->filterActive()) {
+    const bool station_mode = scan_mode == WIFI_ATTACK_DEAUTH_TARGETED;
+    const bool ap_selected = this->filterActive();
+    bool station_selected = false;
+
+    if (station_mode && ap_selected) {
+      for (int ap_index = 0;
+           ap_index < access_points->size() && !station_selected;
+           ap_index++) {
+        const AccessPoint access_point = access_points->get(ap_index);
+        if (!access_point.selected)
+          continue;
+
+        for (int station_index = 0;
+             station_index < access_point.stations->size();
+             station_index++) {
+          const int list_index = access_point.stations->get(station_index);
+          if (list_index < stations->size() &&
+              stations->get(list_index).selected) {
+            station_selected = true;
+            break;
+          }
+        }
+      }
+    }
+
+    if (ap_selected && (!station_mode || station_selected)) {
       display_obj.tft.setTextColor(TFT_RED, TFT_BLACK);
       display_obj.tft.setTextSize(1);
       display_obj.showCenterText("Transmitting...", (STATUS_BAR_WIDTH * 3) + 1, true);
@@ -2653,15 +3094,36 @@ void WiFiScan::displayTargetFilter() {
         display_obj.tft.setTextSize(2);
       #endif
 
-      display_obj.showCenterText("Targeted Networks", (STATUS_BAR_WIDTH * 3) + (CHAR_WIDTH) + 1);
+      display_obj.showCenterText(station_mode ? "Selected Stations" :
+                                                "Selected APs",
+                                 (STATUS_BAR_WIDTH * 3) + (CHAR_WIDTH) + 1);
       display_obj.tft.setTextSize(1);
       display_obj.tft.println();
       display_obj.tft.setTextColor(TFT_WHITE, TFT_BLACK);
       for (int i = 0; i < access_points->size(); i++) {
         AccessPoint access_point = access_points->get(i);
         if (access_point.selected) {
-          String msg_str = "CH: " + (String)access_point.channel + " " + access_point.essid;
-          display_obj.showCenterText(msg_str.c_str(), display_obj.tft.getCursorY(), true);
+          if (station_mode) {
+            for (int station_index = 0;
+                 station_index < access_point.stations->size();
+                 station_index++) {
+              const int list_index = access_point.stations->get(station_index);
+              if (list_index < stations->size() &&
+                  stations->get(list_index).selected) {
+                const String msg_str = "CH:" +
+                    (String)access_point.channel + " " +
+                    macToString(stations->get(list_index));
+                display_obj.showCenterText(msg_str.c_str(),
+                                           display_obj.tft.getCursorY(), true);
+              }
+            }
+          }
+          else {
+            const String msg_str = "CH:" + (String)access_point.channel +
+                                   " " + access_point.essid;
+            display_obj.showCenterText(msg_str.c_str(),
+                                       display_obj.tft.getCursorY(), true);
+          }
         }
       }
     } else {
@@ -2672,7 +3134,10 @@ void WiFiScan::displayTargetFilter() {
         display_obj.tft.setTextSize(2);
       #endif
 
-      display_obj.showCenterText("No Networks Selected", (STATUS_BAR_WIDTH * 3) + (CHAR_WIDTH));
+      const char* message = !ap_selected ? "No APs Selected" :
+                                           "No Stations Selected";
+      display_obj.showCenterText(message,
+                                 (STATUS_BAR_WIDTH * 3) + (CHAR_WIDTH));
     }
   #endif
 }
@@ -2704,9 +3169,10 @@ void WiFiScan::startWiFiAttacks(uint8_t scan_mode, uint16_t color, const char* t
       (scan_mode == WIFI_ATTACK_SLEEP) ||
       (scan_mode == WIFI_ATTACK_SLEEP_TARGETED) ||
       (scan_mode == WIFI_ATTACK_AP_SPAM) ||
+      (scan_mode == WIFI_ATTACK_SSID_GROUP_CLONE) ||
       (scan_mode == WIFI_ATTACK_CSA) ||
       (scan_mode == WIFI_ATTACK_QUIET)) {
-    this->displayTargetFilter();
+    this->displayTargetFilter(scan_mode);
   }
 
   //wifi_ap_config_t ap_config;
@@ -2862,6 +3328,8 @@ void WiFiScan::StopScan(uint8_t scan_mode) {
   const bool stoppingBLECapture = currentScanMode == BT_SCAN_ADVERTISEMENT_CAPTURE;
   const bool stoppingCameraDeauth =
       currentScanMode == WIFI_ATTACK_CAMERA_DEAUTH;
+  const bool stoppingSSIDFinder =
+      currentScanMode == WIFI_SCAN_SSID_FINDER;
   if ((currentScanMode == WIFI_SCAN_PROBE) ||
   (currentScanMode == WIFI_SCAN_SAE_COMMIT) ||
   (currentScanMode == WIFI_SCAN_AP) ||
@@ -2870,6 +3338,7 @@ void WiFiScan::StopScan(uint8_t scan_mode) {
   (currentScanMode == WIFI_SCAN_RAW_CAPTURE) ||
   (currentScanMode == WIFI_SCAN_STATION) ||
   (currentScanMode == WIFI_SCAN_SIG_STREN) ||
+  (currentScanMode == WIFI_SCAN_SSID_FINDER) ||
   (currentScanMode == WIFI_SCAN_AP_STA) ||
   (currentScanMode == WIFI_PING_SCAN) ||
   (currentScanMode == WIFI_ARP_SCAN) ||
@@ -2907,6 +3376,7 @@ void WiFiScan::StopScan(uint8_t scan_mode) {
   (currentScanMode == WIFI_ATTACK_RICK_ROLL) ||
   (currentScanMode == WIFI_ATTACK_FUNNY_BEACON) ||
   (currentScanMode == WIFI_ATTACK_AP_SPAM) ||
+  (currentScanMode == WIFI_ATTACK_SSID_GROUP_CLONE) ||
   (currentScanMode == WIFI_PACKET_MONITOR) ||
   (currentScanMode == WIFI_SCAN_CHAN_ANALYZER) ||
   (currentScanMode == WIFI_SCAN_CHAN_ACT) ||
@@ -3046,6 +3516,9 @@ void WiFiScan::StopScan(uint8_t scan_mode) {
     this->camera_deauth_view = 0;
     this->camera_deauth_next_ui = 0;
   }
+
+  if (stoppingSSIDFinder)
+    this->resetSSIDFinder();
 }
 
 void WiFiScan::getMAC(bool get_sta, uint8_t* mac) {
@@ -4133,10 +4606,16 @@ void WiFiScan::RunEvilPortal(uint8_t scan_mode, uint16_t color) {
 
 // Function to start running a beacon scan
 void WiFiScan::RunAPScan(uint8_t scan_mode, uint16_t color) {
-  if (scan_mode != WIFI_SCAN_AP_STA)
-    startPcap("ap");
-  else
+  const bool ssid_group_scan = this->ssid_group_scan_pending &&
+                               scan_mode == WIFI_SCAN_AP;
+  this->ssid_group_scan_pending = false;
+
+  if (scan_mode == WIFI_SCAN_AP_STA)
     startPcap("ap_sta");
+  else if (ssid_group_scan)
+    startPcap("ssid_groups");
+  else
+    startPcap("ap");
 
   this->setLEDMode(MODE_SNIFF);
   #ifdef HAS_SCREEN
@@ -4147,7 +4626,9 @@ void WiFiScan::RunAPScan(uint8_t scan_mode, uint16_t color) {
       display_obj.tft.setTextColor(TFT_BLACK, color);
     #ifdef HAS_FULL_SCREEN
       display_obj.tft.fillRect(0,16,TFT_WIDTH,16, color);
-      if (scan_mode != WIFI_SCAN_AP_STA)
+      if (ssid_group_scan)
+        display_obj.tft.drawCentreString("Scan SSIDs",TFT_WIDTH / 2,16,2);
+      else if (scan_mode != WIFI_SCAN_AP_STA)
         display_obj.tft.drawCentreString(text_table4[44],TFT_WIDTH / 2,16,2);
       else
         display_obj.tft.drawCentreString("Scan AP/STA",TFT_WIDTH / 2,16,2);
@@ -4155,6 +4636,8 @@ void WiFiScan::RunAPScan(uint8_t scan_mode, uint16_t color) {
     this->prepareScanStage(TFT_GREEN, TFT_BLACK);
   #endif
 
+  this->clearList(CLEAR_APS);
+  this->clearList(CLEAR_STA);
   delete access_points;
   access_points = new LinkedList<AccessPoint>();
 
@@ -4371,6 +4854,20 @@ bool WiFiScan::RunGPSInfo(bool tracker, bool display, bool poi) {
           return_val = false;
           display_obj.tft.println(F("  Good Fix: No"));
         }
+
+        display_obj.tft.println(gps_obj.getGpsModuleStatus()
+                                    ? F("  NMEA: Active")
+                                    : F("  NMEA: Searching"));
+        if (gps_obj.getBaudRate() != 0)
+          display_obj.tft.println("  Baud: " + String(gps_obj.getBaudRate()));
+        else
+          display_obj.tft.println(F("  Baud: Auto"));
+        if (gps_obj.getLastSentenceAgeMs() != UINT32_MAX)
+          display_obj.tft.println("  Age: " +
+                                  String(gps_obj.getLastSentenceAgeMs()) +
+                                  " ms");
+        else
+          display_obj.tft.println(F("  Age: --"));
           
         if(text != "") display_obj.tft.println("      Text: " + text);
 
@@ -4379,7 +4876,15 @@ bool WiFiScan::RunGPSInfo(bool tracker, bool display, bool poi) {
         display_obj.tft.println("  Lat: " + gps_obj.getLat());
         display_obj.tft.println("  Lon: " + gps_obj.getLon());
         display_obj.tft.println("  Alt: " + (String)gps_obj.getAlt());
-        display_obj.tft.println("  D/T: " + gps_obj.getDatetime());
+        #ifdef MARAUDER_MINI_V3
+          this->gps_datetime_display_value = gps_obj.getDatetime();
+          this->gps_datetime_row_y = min(
+              display_obj.tft.getCursorY(),
+              static_cast<int16_t>(TFT_HEIGHT - MINI_GPS_DATETIME_ROW_HEIGHT));
+          this->drawMiniGpsDateTime();
+        #else
+          display_obj.tft.println("  D/T: " + gps_obj.getDatetime());
+        #endif
       #endif
 
       // Display to serial
@@ -4388,6 +4893,19 @@ bool WiFiScan::RunGPSInfo(bool tracker, bool display, bool poi) {
         Serial.println(F("  Fix: Yes"));
       else
         Serial.println(F("  Fix: No"));
+
+      Serial.println(gps_obj.getGpsModuleStatus()
+                         ? F(" NMEA: Active")
+                         : F(" NMEA: Searching"));
+      if (gps_obj.getBaudRate() != 0)
+        Serial.println(" Baud: " + String(gps_obj.getBaudRate()));
+      else
+        Serial.println(F(" Baud: Auto"));
+      if (gps_obj.getLastSentenceAgeMs() != UINT32_MAX)
+        Serial.println("  Age: " + String(gps_obj.getLastSentenceAgeMs()) +
+                       " ms");
+      else
+        Serial.println(F("  Age: --"));
         
       if(text != "") Serial.println("      Text: " + text);
 
@@ -4402,6 +4920,112 @@ bool WiFiScan::RunGPSInfo(bool tracker, bool display, bool poi) {
 
   return return_val;
 }
+
+#if defined(MARAUDER_MINI_V3) && defined(HAS_GPS)
+void WiFiScan::resetMiniGpsDateTime(uint32_t current_time,
+                                    bool clear_selection) {
+  if (current_time == 0)
+    current_time = millis();
+  if (clear_selection)
+    this->gps_datetime_selected = false;
+  this->gps_datetime_scroll_offset = 0;
+  this->gps_datetime_scroll_direction = 1;
+  this->gps_datetime_next_scroll_ms =
+      current_time + MINI_GPS_DATETIME_PAUSE_MS;
+}
+
+void WiFiScan::drawMiniGpsDateTime() {
+  if (this->gps_datetime_row_y < 0)
+    return;
+
+  const uint16_t background = this->gps_datetime_selected
+                                ? MINI_GPS_DATETIME_SELECTED_BG
+                                : TFT_BLACK;
+  const uint16_t foreground = this->gps_datetime_selected
+                                ? TFT_WHITE
+                                : TFT_CYAN;
+  const String line = "D/T: " + this->gps_datetime_display_value;
+
+  display_obj.tft.setFreeFont(NULL);
+  display_obj.tft.setTextSize(1);
+  display_obj.tft.setTextWrap(false);
+  display_obj.tft.fillRect(0, this->gps_datetime_row_y, TFT_WIDTH,
+                           MINI_GPS_DATETIME_ROW_HEIGHT, background);
+  display_obj.tft.setTextColor(foreground, background, true);
+  display_obj.tft.setViewport(MINI_GPS_DATETIME_VIEWPORT_X,
+                              this->gps_datetime_row_y,
+                              MINI_GPS_DATETIME_VIEWPORT_WIDTH,
+                              MINI_GPS_DATETIME_ROW_HEIGHT);
+  display_obj.tft.setCursor(
+      -static_cast<int16_t>(this->gps_datetime_scroll_offset), 0);
+  display_obj.tft.print(line);
+  display_obj.tft.resetViewport();
+  display_obj.tft.setTextColor(TFT_CYAN, TFT_BLACK);
+}
+
+void WiFiScan::updateMiniGpsDateTime(uint32_t current_time) {
+  const bool down_pressed = d_btn.justPressed();
+  const bool right_pressed = r_btn.justPressed();
+  const bool up_pressed = u_btn.justPressed();
+  const bool left_pressed = l_btn.justPressed();
+  const bool select_pressed = down_pressed || right_pressed;
+  const bool clear_pressed = up_pressed || left_pressed;
+
+  if (select_pressed && !this->gps_datetime_selected) {
+    this->gps_datetime_selected = true;
+    this->resetMiniGpsDateTime(current_time, false);
+    this->drawMiniGpsDateTime();
+  }
+  else if (clear_pressed && this->gps_datetime_selected) {
+    this->gps_datetime_selected = false;
+    this->resetMiniGpsDateTime(current_time, false);
+    this->drawMiniGpsDateTime();
+  }
+
+  if (!this->gps_datetime_selected || this->gps_datetime_row_y < 0 ||
+      static_cast<int32_t>(current_time - this->gps_datetime_next_scroll_ms) < 0)
+    return;
+
+  display_obj.tft.setFreeFont(NULL);
+  display_obj.tft.setTextSize(1);
+  const String line = "D/T: " + this->gps_datetime_display_value;
+  const int16_t text_width = display_obj.tft.textWidth(line);
+  if (text_width <= MINI_GPS_DATETIME_VIEWPORT_WIDTH)
+    return;
+
+  const uint16_t maximum_offset =
+      text_width - MINI_GPS_DATETIME_VIEWPORT_WIDTH;
+  if (this->gps_datetime_scroll_direction > 0) {
+    if (this->gps_datetime_scroll_offset < maximum_offset)
+      this->gps_datetime_scroll_offset++;
+    if (this->gps_datetime_scroll_offset >= maximum_offset) {
+      this->gps_datetime_scroll_offset = maximum_offset;
+      this->gps_datetime_scroll_direction = -1;
+      this->gps_datetime_next_scroll_ms =
+          current_time + MINI_GPS_DATETIME_PAUSE_MS;
+    }
+    else {
+      this->gps_datetime_next_scroll_ms =
+          current_time + MINI_GPS_DATETIME_STEP_MS;
+    }
+  }
+  else {
+    if (this->gps_datetime_scroll_offset > 0)
+      this->gps_datetime_scroll_offset--;
+    if (this->gps_datetime_scroll_offset == 0) {
+      this->gps_datetime_scroll_direction = 1;
+      this->gps_datetime_next_scroll_ms =
+          current_time + MINI_GPS_DATETIME_PAUSE_MS;
+    }
+    else {
+      this->gps_datetime_next_scroll_ms =
+          current_time + MINI_GPS_DATETIME_STEP_MS;
+    }
+  }
+
+  this->drawMiniGpsDateTime();
+}
+#endif
 
 void WiFiScan::RunGPSNmea() {
   #ifdef HAS_GPS
@@ -6418,6 +7042,164 @@ void WiFiScan::RunRawScan(uint8_t scan_mode, uint16_t color) {
   initTime = millis();
 }
 
+void WiFiScan::RunSSIDFinder(uint8_t scan_mode, uint16_t color) {
+  if (scan_mode != WIFI_SCAN_SSID_FINDER ||
+      this->ssid_finder_aps.empty() ||
+      this->ssid_finder_channels.empty())
+    return;
+
+  this->setLEDMode(MODE_SNIFF);
+  this->ssid_finder_channel_cursor = 0;
+  this->set_channel = this->ssid_finder_channels[0];
+  this->last_ui_update = 0;
+  this->initTime = millis();
+
+  #ifdef HAS_SCREEN
+    this->setupScanDisplayArea(TFT_WHITE, color);
+    if (this->ssid_finder_sprite == nullptr) {
+      this->ssid_finder_sprite = new TFT_eSprite(&display_obj.tft);
+      if (this->ssid_finder_sprite != nullptr)
+        this->ssid_finder_sprite->setColorDepth(16);
+      if (this->ssid_finder_sprite == nullptr ||
+          this->ssid_finder_sprite->createSprite(TFT_WIDTH, TFT_HEIGHT) ==
+              nullptr) {
+        delete this->ssid_finder_sprite;
+        this->ssid_finder_sprite = nullptr;
+        Serial.println(F("[SSID Finder] Frame buffer unavailable; using direct drawing"));
+      }
+      else {
+        this->ssid_finder_sprite->setTextFont(1);
+        this->ssid_finder_sprite->setTextWrap(false);
+      }
+    }
+  #endif
+
+  esp_wifi_init(&cfg2);
+  #ifdef HAS_IDF_3
+    esp_wifi_set_country(&country);
+    esp_event_loop_create_default();
+  #endif
+  esp_wifi_set_ps(WIFI_PS_NONE);
+  this->setWiFiMode(WIFI_MODE_NULL, beaconSnifferCallback);
+  this->changeChannel(this->set_channel);
+  this->wifi_initialized = true;
+  this->drawSSIDFinder(millis());
+}
+
+void WiFiScan::drawSSIDFinder(uint32_t current_time) {
+  #ifdef HAS_SCREEN
+    SSIDFinderUiSnapshot snapshot;
+    snapshot.ssid = this->ssid_finder_name.length() > 0
+                        ? this->ssid_finder_name
+                        : String("<Hidden SSID>");
+    if (snapshot.ssid.length() > 20)
+      snapshot.ssid = snapshot.ssid.substring(0, 17) + "...";
+
+    uint16_t found_count = 0;
+    for (const SSIDFinderAP& finder_ap : this->ssid_finder_aps) {
+      if (finder_ap.found)
+        found_count++;
+    }
+    snapshot.all_found = !this->ssid_finder_aps.empty() &&
+                         found_count == this->ssid_finder_aps.size();
+
+    if (this->ssid_finder_active >= 0 &&
+        this->ssid_finder_active <
+            static_cast<int16_t>(this->ssid_finder_aps.size())) {
+      const SSIDFinderAP& target =
+          this->ssid_finder_aps[this->ssid_finder_active];
+      snapshot.rssi = this->ssidFinderRssi(this->ssid_finder_active);
+      snapshot.fresh = current_time - target.last_seen_ms <=
+                       this->ssidFinderFreshWindowMs();
+      snapshot.metadata = "AP " + String(this->ssid_finder_active + 1) +
+                          "/" + String(this->ssid_finder_aps.size()) +
+                          " CH" + String(target.channel) + " " +
+                          (this->ssid_finder_locked ? "LOCK" : "AUTO");
+      snapshot.bssid = macToString(target.bssid);
+      snapshot.measurement = snapshot.fresh
+                                 ? String(snapshot.rssi) + " dBm"
+                                 : String("SEARCHING");
+    }
+    else {
+      snapshot.rssi = -128;
+      snapshot.fresh = false;
+      snapshot.metadata = snapshot.all_found
+                              ? String(this->ssid_finder_aps.size()) +
+                                    " APs COMPLETE"
+                              : String("WAITING FOR AP");
+      snapshot.bssid = snapshot.all_found ? "Press R to restart" : "";
+      snapshot.measurement = "SEARCHING";
+    }
+
+    if (static_cast<int32_t>(this->ssid_finder_switch_notice_until -
+                             current_time) > 0) {
+      snapshot.progress = "SWITCHED  Found " + String(found_count) + "/" +
+                          String(this->ssid_finder_aps.size());
+    }
+    else {
+      const char trend = this->ssid_finder_trend > 0
+                             ? '+'
+                             : (this->ssid_finder_trend < 0 ? '-' : '=');
+      snapshot.progress = "Found " + String(found_count) + "/" +
+                          String(this->ssid_finder_aps.size()) +
+                          "  Signal " + trend;
+    }
+    snapshot.controls = snapshot.all_found
+                            ? String("L EXIT C AUTO R RESET")
+                            : (this->ssid_finder_locked
+                                   ? String("L EXIT C AUTO R FOUND")
+                                   : String("L EXIT C LOCK R FOUND"));
+
+    if (this->ssid_finder_sprite != nullptr) {
+      renderSSIDFinderSurface(*this->ssid_finder_sprite, snapshot);
+      this->ssid_finder_sprite->pushSprite(0, 0);
+    }
+    else {
+      renderSSIDFinderSurface(display_obj.tft, snapshot);
+    }
+  #else
+    (void)current_time;
+  #endif
+}
+
+void WiFiScan::runSSIDFinder(uint32_t current_time) {
+  if (this->ssid_finder_aps.empty() || this->ssid_finder_channels.empty())
+    return;
+
+  if (current_time - this->initTime >= SSID_FINDER_CHANNEL_DWELL_MS) {
+    this->initTime = current_time;
+    this->ssid_finder_channel_cursor =
+        (this->ssid_finder_channel_cursor + 1) %
+        this->ssid_finder_channels.size();
+    this->changeChannel(
+        this->ssid_finder_channels[this->ssid_finder_channel_cursor]);
+    if (this->ssid_finder_channel_cursor == 0)
+      this->evaluateSSIDFinderTarget(current_time, true);
+  }
+
+  if (static_cast<int32_t>(current_time -
+                           this->ssid_finder_next_trend_ms) >= 0) {
+    if (this->ssid_finder_active >= 0) {
+      const int8_t current_rssi =
+          this->ssidFinderRssi(this->ssid_finder_active);
+      const int16_t delta = current_rssi - this->ssid_finder_trend_baseline;
+      this->ssid_finder_trend = delta >= SSID_FINDER_TREND_MARGIN_DB
+                                    ? 1
+                                    : (delta <= -SSID_FINDER_TREND_MARGIN_DB
+                                           ? -1
+                                           : 0);
+      this->ssid_finder_trend_baseline = current_rssi;
+    }
+    this->ssid_finder_next_trend_ms =
+        current_time + SSID_FINDER_TREND_INTERVAL_MS;
+  }
+
+  if (current_time - this->last_ui_update >= SSID_FINDER_UI_REFRESH_MS) {
+    this->last_ui_update = current_time;
+    this->drawSSIDFinder(current_time);
+  }
+}
+
 void WiFiScan::RunDeauthScan(uint8_t scan_mode, uint16_t color) {
   startPcap("deauth");
 
@@ -8360,6 +9142,17 @@ void WiFiScan::beaconSnifferCallback(void* buf, wifi_promiscuous_pkt_type_t type
                         snifferPacket->payload[8],
                         snifferPacket->payload[9]};
 
+  if (wifi_scan_obj.currentScanMode == WIFI_SCAN_SSID_FINDER) {
+    if (type != WIFI_PKT_MGMT || len < 24)
+      return;
+    const uint8_t subtype = snifferPacket->payload[0] & 0xFC;
+    if (subtype != 0x80 && subtype != 0x50)
+      return;
+    wifi_scan_obj.recordSSIDFinderPacket(
+        src_addr, snifferPacket->rx_ctrl.rssi, millis());
+    return;
+  }
+
   String display_string = "";
   String essid = "";
 
@@ -8755,7 +9548,8 @@ void WiFiScan::broadcastCustomBeacon(uint32_t current_time, AccessPoint custom_s
     }
   } else if (scan_mode == WIFI_ATTACK_QUIET) {
     set_channel = custom_ssid.channel;
-  } else if (scan_mode == WIFI_ATTACK_AP_SPAM) {
+  } else if ((scan_mode == WIFI_ATTACK_AP_SPAM) ||
+             (scan_mode == WIFI_ATTACK_SSID_GROUP_CLONE)) {
     set_channel = custom_ssid.channel;
   }
 
@@ -8786,8 +9580,7 @@ void WiFiScan::broadcastCustomBeacon(uint32_t current_time, AccessPoint custom_s
 
   int realLen = strlen(ESSID);
   int ssidLen = realLen;
-  if ((scan_mode != WIFI_ATTACK_CSA) &&
-      (scan_mode != WIFI_ATTACK_QUIET))
+  if (scan_mode == WIFI_ATTACK_AP_SPAM)
     ssidLen = random(realLen, 33);
 
   int numSpace = ssidLen - realLen;
@@ -8799,8 +9592,19 @@ void WiFiScan::broadcastCustomBeacon(uint32_t current_time, AccessPoint custom_s
   memcpy(temp_frame, packet, frame_len);
 
   // Set source address based on attack
-  if ((scan_mode != WIFI_ATTACK_CSA) &&
-      (scan_mode != WIFI_ATTACK_QUIET)) {
+  if (scan_mode == WIFI_ATTACK_SSID_GROUP_CLONE) {
+    // Keep one stable, locally administered clone BSSID for each discovered
+    // AP instead of impersonating the original radio address.
+    temp_frame[10] = temp_frame[16] =
+        (custom_ssid.bssid[0] | 0x02) & 0xFE;
+    temp_frame[11] = temp_frame[17] = custom_ssid.bssid[1];
+    temp_frame[12] = temp_frame[18] = custom_ssid.bssid[2];
+    temp_frame[13] = temp_frame[19] = custom_ssid.bssid[3];
+    temp_frame[14] = temp_frame[20] = custom_ssid.bssid[4];
+    temp_frame[15] = temp_frame[21] = custom_ssid.bssid[5] ^ 0x01;
+  }
+  else if ((scan_mode != WIFI_ATTACK_CSA) &&
+           (scan_mode != WIFI_ATTACK_QUIET)) {
     temp_frame[10] = temp_frame[16] = (random(256) & 0xFE) | 0x02;
     temp_frame[11] = temp_frame[17] = random(256);
     temp_frame[12] = temp_frame[18] = random(256);
@@ -8821,15 +9625,16 @@ void WiFiScan::broadcastCustomBeacon(uint32_t current_time, AccessPoint custom_s
   for(int i = 0; i < realLen; i++)
     temp_frame[38 + i] = ESSID[i];
 
-  if ((scan_mode != WIFI_ATTACK_CSA) &&
-      (scan_mode != WIFI_ATTACK_QUIET)) {
+  if (scan_mode == WIFI_ATTACK_AP_SPAM) {
     for(int i = 0; i < numSpace; i++)
       temp_frame[38 + realLen + i] = 0x20;
-
-    temp_frame[50 + fullLen] = set_channel;
   }
 
   memcpy(temp_frame + (38 + fullLen), post, post_len);
+
+  if ((scan_mode == WIFI_ATTACK_AP_SPAM) ||
+      (scan_mode == WIFI_ATTACK_SSID_GROUP_CLONE))
+    temp_frame[50 + fullLen] = set_channel;
 
   temp_frame[34] = custom_ssid.beacon[0];
   temp_frame[35] = custom_ssid.beacon[1];
@@ -11815,6 +12620,9 @@ void WiFiScan::main(uint32_t currentTime)
   else if (currentScanMode == WIFI_SCAN_SIG_STREN) {
     this->runFoxHunt(currentTime);
   }
+  else if (currentScanMode == WIFI_SCAN_SSID_FINDER) {
+    this->runSSIDFinder(currentTime);
+  }
   /*else if (currentScanMode == WIFI_SCAN_SIG_STREN) {
     #ifdef HAS_ILI9341
       this->signalAnalyzerLoop(currentTime);
@@ -11964,6 +12772,9 @@ void WiFiScan::main(uint32_t currentTime)
     }
   }
   else if (currentScanMode == WIFI_SCAN_GPS_DATA) {
+    #if defined(MARAUDER_MINI_V3) && defined(HAS_GPS)
+      this->updateMiniGpsDateTime(currentTime);
+    #endif
     if (currentTime - initTime >= 5000) {
       this->initTime = millis();
       this->RunGPSInfo();
@@ -12174,6 +12985,7 @@ void WiFiScan::main(uint32_t currentTime)
     }
   }
   else if ((currentScanMode == WIFI_ATTACK_AP_SPAM) ||
+           (currentScanMode == WIFI_ATTACK_SSID_GROUP_CLONE) ||
            (currentScanMode == WIFI_ATTACK_CSA) ||
            (currentScanMode == WIFI_ATTACK_QUIET)) {
     for (int i = 0; i < access_points->size(); i++) {

@@ -25,10 +25,10 @@ except ImportError:  # Shown as a useful GUI error instead of failing at import.
 
 
 APP_NAME = "Marauder Eternal Flasher"
-APP_VERSION = "1.1.1"
+APP_VERSION = "1.1.3"
 FIRMWARE_VERSION = "1.14.4"
 INCLUDED_FILENAME = "Marauder_Eternal_1.14.4_MiniV3_ESP32-C5.bin"
-INCLUDED_SHA256 = "bdfd83eddf63c0f14368384a944a66fba077ed6dd8fc19449ee6be5ae7e68300"
+INCLUDED_SHA256 = "9ef3862a3a9adf76bfb31fb7fa5febe9b7235656498dbc1acc5c59156253eab1"
 FLASH_SIZE = 8 * 1024 * 1024
 APPLICATION_OFFSET = 0x10000
 APPLICATION_LIMIT = 0x3D0000 - APPLICATION_OFFSET
