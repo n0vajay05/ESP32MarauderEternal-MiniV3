@@ -24,9 +24,6 @@ void BatteryInterface::main(uint32_t currentTime) {
 }
 
 void BatteryInterface::RunSetup() {
-  byte error;
-  byte addr;
-
   #ifdef HAS_BATTERY
 
     #ifdef BATTERY_ADC_PIN
@@ -50,6 +47,7 @@ void BatteryInterface::RunSetup() {
     #elif defined(I2C_SDA)  // other i2c (shared)
 
         Wire.begin(I2C_SDA, I2C_SCL);
+        byte error;
 
         #ifdef HAS_IP5306
           Wire.beginTransmission(IP5306_ADDR);

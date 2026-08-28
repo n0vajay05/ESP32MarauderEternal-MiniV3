@@ -131,8 +131,6 @@ class GpsInterface {
     void setGPSInfo();
     void handleCompletedSentence();
     void listenAtBaud(uint32_t baud);
-    bool probeBaud(uint32_t baud);
-    uint32_t detectGpsBaud();
 };
 
 #endif

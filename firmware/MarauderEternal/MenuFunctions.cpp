@@ -652,10 +652,9 @@ void MenuFunctions::buttonNotSelected(int b, int x) {
     this->drawMiniMenuButton(b, x, false);
   #endif
 
-  uint16_t color = (current_menu->list->get(x).icon == SETTINGS && current_menu->list->get(x).color == TFTLIGHTGREY) ? (current_menu->list->get(x).selected ? TFT_GREEN : TFT_RED) : this->getColor(current_menu->list->get(x).color);
-  uint16_t icon_color = (current_menu->list->get(x).icon == SETTINGS && current_menu->list->get(x).color == TFTLIGHTGREY) ? TFT_LIGHTGREY : color;
-
   #ifdef HAS_FULL_SCREEN
+    uint16_t color = (current_menu->list->get(x).icon == SETTINGS && current_menu->list->get(x).color == TFTLIGHTGREY) ? (current_menu->list->get(x).selected ? TFT_GREEN : TFT_RED) : this->getColor(current_menu->list->get(x).color);
+    uint16_t icon_color = (current_menu->list->get(x).icon == SETTINGS && current_menu->list->get(x).color == TFTLIGHTGREY) ? TFT_LIGHTGREY : color;
     display_obj.tft.setFreeFont(MENU_FONT);
     display_obj.key[b].initButton(&display_obj.tft, KEY_X, KEY_Y + b * (KEY_H + KEY_SPACING_Y), KEY_W, KEY_H, TFT_BLACK, TFT_BLACK, color, (char*)"", KEY_TEXTSIZE);
     display_obj.key[b].drawButton(false, current_menu->list->get(x).name);
@@ -678,13 +677,12 @@ void MenuFunctions::buttonSelected(int b, int x) {
   // Ensure b is within valid button index range
   b = (x - menu_start_index) % BUTTON_SCREEN_LIMIT;
 
-  uint16_t color = this->getColor(current_menu->list->get(x).color);
-
   #ifdef HAS_MINI_SCREEN
     this->drawMiniMenuButton(b, x, true);
   #endif
 
   #ifdef HAS_FULL_SCREEN
+    uint16_t color = this->getColor(current_menu->list->get(x).color);
     display_obj.tft.setFreeFont(MENU_FONT);
     if (current_menu->list->get(x).icon == SETTINGS && current_menu->list->get(x).color == TFTLIGHTGREY) {
       uint16_t setting_color = current_menu->list->get(x).selected ? TFT_GREEN : TFT_RED;
@@ -814,9 +812,11 @@ void MenuFunctions::main(uint32_t currentTime)
   }
 
 
-  boolean pressed = false;
-  // This is code from bodmer's keypad example
-  uint16_t t_x = 0, t_y = 0; // To store the touch coordinates
+  #ifdef HAS_ILI9341
+    boolean pressed = false;
+    // This is code from bodmer's keypad example
+    uint16_t t_x = 0, t_y = 0; // To store the touch coordinates
+  #endif
 
   // Get the display buffer out of the way
   if ((wifi_scan_obj.currentScanMode != WIFI_SCAN_OFF ) &&
@@ -841,8 +841,6 @@ void MenuFunctions::main(uint32_t currentTime)
       (wifi_scan_obj.currentScanMode != WIFI_ATTACK_RICK_ROLL))
     display_obj.displayBuffer();
 
-
-  int pre_getTouch = millis();
 
   #ifdef HAS_ILI9341
     if (!this->disable_touch)
@@ -1191,7 +1189,7 @@ void MenuFunctions::main(uint32_t currentTime)
       }*/
 
       // Detect up, down, select
-      uint8_t menu_button = display_obj.menuButton(&t_x, &t_y, pressed);
+      int8_t menu_button = display_obj.menuButton(&t_x, &t_y, pressed);
 
       if (menu_button > -1) {
         if (menu_button == UP_BUTTON) {
@@ -2668,7 +2666,6 @@ void MenuFunctions::RunSetup()
   extern LinkedList<IPAddress>* ipList;
   extern LinkedList<ProbeReqSsid>* probe_req_ssids;
   extern LinkedList<ssid>* ssids;
-  extern LinkedList<BleDevice>* ble_devices;
 
   this->disable_touch = false;
 
@@ -3015,12 +3012,167 @@ void MenuFunctions::RunSetup()
     wifi_scan_obj.prepareSSIDGroupScan();
     display_obj.clearScreen();
     this->drawStatusBar();
-    wifi_scan_obj.StartScan(WIFI_SCAN_AP, TFT_GREEN);
+    wifi_scan_obj.StartScan(WIFI_SCAN_AP_STA, TFT_GREEN);
   });
   this->addNodes(&wifiSnifferMenu, "Select SSIDs", TFTGREEN,
                  KEYBOARD_ICO, [this]() {
     this->buildSSIDGroupMenu();
     this->changeMenu(&ssidGroupMenu, true);
+  });
+  this->addNodes(&wifiSnifferMenu, "Select Stations", TFTCYAN,
+                 KEYBOARD_ICO, [this]() {
+    wifiAPMenu.parentMenu = &wifiSnifferMenu;
+    wifiAPMenu.list->clear();
+    this->addNodes(&wifiAPMenu, text09, TFTLIGHTGREY, 0, [this]() {
+      this->changeMenu(wifiAPMenu.parentMenu, true);
+    });
+
+    if (access_points->size() == 0) {
+      this->addNodes(&wifiAPMenu, "No APs - Scan SSIDs", TFTLIGHTGREY,
+                     255, []() {});
+    }
+
+    for (int ap_index = 0; ap_index < access_points->size(); ap_index++) {
+      this->addNodes(&wifiAPMenu,
+                     access_points->get(ap_index).essid.c_str(),
+                     TFTCYAN, 255, [this, ap_index]() {
+        wifiStationMenu.list->clear();
+        wifiStationMenu.parentMenu = &wifiAPMenu;
+
+        this->addNodes(&wifiStationMenu, text09, TFTLIGHTGREY, 0,
+                       [this]() {
+          this->changeMenu(wifiStationMenu.parentMenu, true);
+        });
+
+        this->addNodes(&wifiStationMenu, "Select ALL", TFTGREEN, 255,
+                       [this, ap_index]() {
+          bool all_selected =
+              access_points->get(ap_index).stations->size() > 0;
+          for (int station_offset = 0;
+               station_offset < access_points->get(ap_index).stations->size();
+               station_offset++) {
+            const int station_index =
+                access_points->get(ap_index).stations->get(station_offset);
+            if (station_index >= stations->size() ||
+                !stations->get(station_index).selected) {
+              all_selected = false;
+              break;
+            }
+          }
+          const bool select = !all_selected;
+          for (int station_offset = 0;
+               station_offset < access_points->get(ap_index).stations->size();
+               station_offset++) {
+            const int station_index =
+                access_points->get(ap_index).stations->get(station_offset);
+            if (station_index >= stations->size())
+              continue;
+            Station station = stations->get(station_index);
+            station.selected = select;
+
+            MenuNode node = current_menu->list->get(station_offset + 2);
+            node.selected = station.selected;
+            current_menu->list->set(station_offset + 2, node);
+            stations->set(station_index, station);
+          }
+          if (select) {
+            AccessPoint access_point = access_points->get(ap_index);
+            access_point.selected = true;
+            access_points->set(ap_index, access_point);
+          }
+          this->changeMenu(current_menu, true);
+        });
+
+        if (access_points->get(ap_index).stations->size() == 0) {
+          this->addNodes(&wifiStationMenu, "No stations found",
+                         TFTLIGHTGREY, 255, []() {});
+        }
+
+        for (int station_offset = 0;
+             station_offset < access_points->get(ap_index).stations->size();
+             station_offset++) {
+          const int station_index =
+              access_points->get(ap_index).stations->get(station_offset);
+          this->addNodes(
+              &wifiStationMenu,
+              macToString(stations->get(station_index)).c_str(),
+              TFTCYAN, 255,
+              [this, ap_index, station_index, station_offset]() {
+                if (station_index >= stations->size())
+                  return;
+                Station station = stations->get(station_index);
+                station.selected = !station.selected;
+
+                if (station.selected) {
+                  AccessPoint access_point = access_points->get(ap_index);
+                  access_point.selected = true;
+                  access_points->set(ap_index, access_point);
+                }
+
+                MenuNode node = current_menu->list->get(station_offset + 2);
+                node.selected = station.selected;
+                current_menu->list->set(station_offset + 2, node);
+                stations->set(station_index, station);
+              },
+              stations->get(station_index).selected);
+        }
+
+        this->changeMenu(&wifiStationMenu, true);
+      });
+    }
+    this->changeMenu(&wifiAPMenu, true);
+  });
+  this->addNodes(&wifiSnifferMenu, "Select Probe SSIDs", TFTCYAN,
+                 KEYBOARD_ICO, [this]() {
+    selectProbeSSIDsMenu.list->clear();
+
+    this->addNodes(&selectProbeSSIDsMenu, text09, TFTLIGHTGREY, 0,
+                   [this]() {
+      this->changeMenu(&wifiSnifferMenu, true);
+    });
+
+    this->addNodes(&selectProbeSSIDsMenu, "Apply Selections", TFTGREEN,
+                   255, [this]() {
+      if (probe_req_ssids->size() > 0) {
+        for (int probe_index = 0;
+             probe_index < probe_req_ssids->size(); probe_index++) {
+          const ProbeReqSsid probe_ssid = probe_req_ssids->get(probe_index);
+          if (!probe_ssid.selected)
+            continue;
+
+          bool ssid_exists = false;
+          for (int ssid_index = 0; ssid_index < ssids->size(); ssid_index++) {
+            if (ssids->get(ssid_index).essid == probe_ssid.essid) {
+              ssid_exists = true;
+              break;
+            }
+          }
+          if (!ssid_exists)
+            wifi_scan_obj.addSSID(probe_ssid.essid);
+        }
+      }
+      this->changeMenu(&wifiSnifferMenu, true);
+    });
+
+    for (int probe_index = 0;
+         probe_index < probe_req_ssids->size(); probe_index++) {
+      const ProbeReqSsid probe_ssid = probe_req_ssids->get(probe_index);
+      const String button_name = "[" + String(probe_ssid.requests) + "]" +
+                                 probe_ssid.essid;
+      this->addNodes(
+          &selectProbeSSIDsMenu, button_name.c_str(), TFTCYAN, 255,
+          [this, probe_index]() {
+            ProbeReqSsid probe_ssid = probe_req_ssids->get(probe_index);
+            probe_ssid.selected = !probe_ssid.selected;
+
+            MenuNode node = current_menu->list->get(probe_index + 2);
+            node.selected = probe_ssid.selected;
+            current_menu->list->set(probe_index + 1, node);
+            probe_req_ssids->set(probe_index, probe_ssid);
+          },
+          probe_ssid.selected);
+    }
+    this->changeMenu(&selectProbeSSIDsMenu, true);
   });
   this->addNodes(&wifiSnifferMenu, "SSID Finder", TFTCYAN,
                  SCANNERS, [this]() {
@@ -3373,6 +3525,16 @@ void MenuFunctions::RunSetup()
   this->addNodes(&evilPortalMenu, text09, TFTLIGHTGREY, 0, [this]() {
     this->changeMenu(evilPortalMenu.parentMenu, true);
   });
+  this->addNodes(&evilPortalMenu, "AP Config", TFTMAGENTA, SD_UPDATE, [this]() {
+    if (evil_portal_obj.setAPFromConfig()) {
+      display_obj.clearScreen();
+      this->drawStatusBar();
+      wifi_scan_obj.StartScan(WIFI_SCAN_EVIL_PORTAL, TFT_MAGENTA);
+      wifi_scan_obj.setMac();
+    }
+    else
+      this->changeMenu(&evilPortalMenu, true);
+  });
   this->addNodes(&evilPortalMenu, "Access Points", TFTGREEN, BEACON_SNIFF, [this]() {
     this->changeMenu(&wifiAPMenu, true);
   });
@@ -3388,66 +3550,6 @@ void MenuFunctions::RunSetup()
   this->addNodes(&wifiGeneralMenu, text_table1[27], TFTSKYBLUE, GENERATE, [this]() {
     this->changeMenu(&generateSSIDsMenu, true);
     wifi_scan_obj.RunGenerateSSIDs();
-  });
-
-	//Add Select probe ssid
-  this->addNodes(&wifiGeneralMenu, text_table1[65], TFTCYAN, KEYBOARD_ICO, [this]() {
-    selectProbeSSIDsMenu.list->clear();
-
-    // Add the back button
-    this->addNodes(&selectProbeSSIDsMenu, text09, TFTLIGHTGREY, 0, [this]() {
-      this->changeMenu(&wifiGeneralMenu, true);
-
-      // TODO: TBD - Should probe_req_ssids have it´s own life and override ap.config and/or ssids -list for EP?
-      // If so, then we should not add selected ssids to ssids list
-
-      // Add selected ssid names to ssids list when clicking back button
-      if (probe_req_ssids->size() > 0) {
-
-        //TODO: TBD - Clear ssids list before adding new ones??
-
-        for (int i = 0; i < probe_req_ssids->size(); i++) {
-          ProbeReqSsid cur_probe_ssid = probe_req_ssids->get(i);
-          if (cur_probe_ssid.selected) {
-            bool ssidExists = false;
-            for (int i = 0; i < ssids->size(); i++) {
-              if (ssids->get(i).essid == cur_probe_ssid.essid) {
-                ssidExists = true;
-                break;
-              }
-            }
-            if (!ssidExists) {
-              wifi_scan_obj.addSSID(cur_probe_ssid.essid);
-            }
-          }
-        }
-      }
-    });
-
-    // Populate the menu with buttons
-    for (int i = 0; i < probe_req_ssids->size(); i++) {
-      ProbeReqSsid cur_ssid = probe_req_ssids->get(i);
-      // This is the menu node
-      String button_name = "[" + String(cur_ssid.requests) + "]" + cur_ssid.essid;
-      this->addNodes(
-        &selectProbeSSIDsMenu,
-        button_name.c_str(),
-        TFTCYAN,
-        255,
-        [this, i]() {
-          ProbeReqSsid new_ssid = probe_req_ssids->get(i);
-          new_ssid.selected = !probe_req_ssids->get(i).selected;
-
-          // Change selection status of menu node
-          MenuNode new_node = current_menu->list->get(i + 1);
-          new_node.selected = !current_menu->list->get(i + 1).selected;
-          current_menu->list->set(i + 1, new_node);
-
-          probe_req_ssids->set(i, new_ssid);
-        },
-        probe_req_ssids->get(i).selected);
-    }
-    this->changeMenu(&selectProbeSSIDsMenu, true);
   });
 
   clearSSIDsMenu.parentMenu = &wifiGeneralMenu;
@@ -3537,79 +3639,6 @@ void MenuFunctions::RunSetup()
     this->addNodes(&wifiIPMenu, text09, TFTLIGHTGREY, 0, [this]() {
       this->changeMenu(wifiIPMenu.parentMenu, true);
     });
-
-
-    // Select Stations on Mini v2
-    this->addNodes(&wifiGeneralMenu, "Select Stations", TFTCYAN, KEYBOARD_ICO, [this](){
-      wifiAPMenu.parentMenu = &wifiGeneralMenu;
-
-      wifiAPMenu.list->clear();
-        this->addNodes(&wifiAPMenu, text09, TFTLIGHTGREY, 0, [this]() {
-        this->changeMenu(wifiAPMenu.parentMenu, true);
-      });
-
-      int menu_limit = access_points->size();
-
-
-      for (int i = 0; i < menu_limit; i++) {
-        wifiStationMenu.list->clear();
-        this->addNodes(&wifiAPMenu, access_points->get(i).essid.c_str(), TFTCYAN, 255, [this, i](){
-
-          wifiStationMenu.list->clear();
-
-          wifiStationMenu.parentMenu = &wifiAPMenu;
-
-          // Add back button to the APs
-          this->addNodes(&wifiStationMenu, text09, TFTLIGHTGREY, 0, [this]() {
-            this->changeMenu(wifiStationMenu.parentMenu, true);
-          });
-
-          this->addNodes(&wifiStationMenu, "Select ALL", TFTGREEN, 255, [this, i](){
-
-            for (int y = 0; y < access_points->get(i).stations->size(); y++) {
-              int cur_ap_sta_inx = access_points->get(i).stations->get(y);
-              Station new_sta = stations->get(cur_ap_sta_inx);
-              new_sta.selected = !stations->get(cur_ap_sta_inx).selected;
-
-              // Change selection status of menu node
-              MenuNode new_node = current_menu->list->get(y + 2);
-              new_node.selected = !current_menu->list->get(y + 2).selected;
-              current_menu->list->set(y + 2, new_node);
-
-              stations->set(cur_ap_sta_inx, new_sta);
-            }
-
-            this->changeMenu(current_menu, true);
-
-          });
-
-          // Add the AP's stations to the specific AP menu
-          for (int x = 0; x < access_points->get(i).stations->size(); x++) {
-            int cur_ap_sta = access_points->get(i).stations->get(x);
-
-            this->addNodes(&wifiStationMenu, macToString(stations->get(cur_ap_sta)).c_str(), TFTCYAN, 255, [this, i, cur_ap_sta, x](){
-            Station new_sta = stations->get(cur_ap_sta);
-            new_sta.selected = !stations->get(cur_ap_sta).selected;
-
-            // Change selection status of menu node
-            MenuNode new_node = current_menu->list->get(x + 2);
-            new_node.selected = !current_menu->list->get(x + 2).selected;
-            current_menu->list->set(x + 2, new_node);
-
-            stations->set(cur_ap_sta, new_sta);
-            }, stations->get(cur_ap_sta).selected);
-          }
-
-          // Final change menu to the menu of Stations
-          this->changeMenu(&wifiStationMenu, true);
-          
-        }, false);
-      }
-      this->changeMenu(&wifiAPMenu, true);
-    });
-
-    // Keep station selection immediately below Back in WiFi General.
-    wifiGeneralMenu.list->add(1, wifiGeneralMenu.list->pop());
 
     this->addNodes(&wifiGeneralMenu, "Join WiFi", TFTWHITE, KEYBOARD_ICO, [this](){
 
@@ -4406,7 +4435,7 @@ void MenuFunctions::RunSetup()
 
           // Clear nodes and add back button
           wifiAPMenu.list->clear();
-          this->addNodes(&wifiAPMenu, text09, TFT_LIGHTGREY, 0, [this]() {
+          this->addNodes(&wifiAPMenu, text09, TFTLIGHTGREY, 0, [this]() {
           this->changeMenu(wifiAPMenu.parentMenu, true);
         });
 
@@ -4985,7 +5014,7 @@ void MenuFunctions::RunSetup()
           #ifdef HAS_TOUCH
             bool touched = display_obj.updateTouch(&t_x, &t_y);
 
-            uint8_t menu_button = display_obj.menuButton(&t_x, &t_y, touched);
+            int8_t menu_button = display_obj.menuButton(&t_x, &t_y, touched);
 
             // Cycle char previous
             if (menu_button == UP_BUTTON) {
@@ -5230,7 +5259,7 @@ void MenuFunctions::buildSDFileMenu(bool update) {
 
 
 // Function to add MenuNodes to a menu
-void MenuFunctions::addNodes(Menu * menu, const char* name, uint8_t color, int place, std::function<void()> callable, bool selected)
+void MenuFunctions::addNodes(Menu * menu, const char* name, uint8_t color, uint8_t place, std::function<void()> callable, bool selected)
 {
   //Serial.println("Building node: " + name);
   menu->list->add(MenuNode{String(name), false, color, place, selected, callable});
@@ -5658,8 +5687,8 @@ void MenuFunctions::displayCurrentMenu(int start_index)
     {
       if (!current_menu || !current_menu->list || i >= current_menu->list->size())
         continue;
-      uint16_t color = this->getColor(current_menu->list->get(i).color);
       #ifdef HAS_FULL_SCREEN
+        uint16_t color = this->getColor(current_menu->list->get(i).color);
         bool is_setting_node = (current_menu->list->get(i).icon == SETTINGS && current_menu->list->get(i).color == TFTLIGHTGREY);
         if (is_setting_node && current_menu->selected == i) {
           uint16_t setting_color = current_menu->list->get(i).selected ? TFT_GREEN : TFT_RED;

@@ -1,13 +1,16 @@
 # -*- mode: python ; coding: utf-8 -*-
 
 from pathlib import Path
+import json
 import sys
 
 from PyInstaller.utils.hooks import collect_data_files, collect_submodules
 
 
 project_root = Path(SPECPATH).resolve().parent
-firmware = project_root / "release" / "Marauder_Eternal_1.14.4_MiniV3_ESP32-C5.bin"
+manifest = project_root / "release" / "manifest.json"
+release = json.loads(manifest.read_text(encoding="utf-8"))
+firmware = project_root / "release" / release["full_device_image"]["file"]
 notices = project_root / "flasher" / "THIRD_PARTY_NOTICES.md"
 
 if not firmware.is_file():
@@ -15,6 +18,7 @@ if not firmware.is_file():
 
 datas = [
     (str(firmware), "firmware"),
+    (str(manifest), "firmware"),
     (str(notices), "."),
 ]
 datas += collect_data_files("esptool")

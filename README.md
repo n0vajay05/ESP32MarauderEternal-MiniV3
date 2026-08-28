@@ -1,4 +1,4 @@
-# ESP32 Marauder Eternal 1.14.4
+# ESP32 Marauder Eternal 1.15.1
 
 <img width="314" height="314" alt="esp32_marauder_eternal_source" src="https://github.com/user-attachments/assets/79332db4-7a71-423f-a99d-937090bb196f" />
 
@@ -19,7 +19,7 @@ Marauder code base by JustCallMeKoKo and modified for the Marauder Mini V3 only.
 ## Release identity
 
 - Product: `ESP32 Marauder Eternal`
-- Version: `v1.14.4`
+- Version: `v1.15.1`
 - Arduino ESP32 core used for the verified build: `3.3.4`
 - Board target: `esp32:esp32:esp32c5`
 - Options: `FlashSize=8M,PartitionScheme=custom,PSRAM=enabled`
@@ -85,9 +85,10 @@ reset after all are found), and **Left** to exit. The display tracks progress as
 
 ## Flash the existing device
 
-The normal flasher updates only the application partition at `0x10000`, which
-preserves the installed bootloader, partition table, NVS settings, and stored
-device data:
+The normal flasher writes the same application image to both OTA application
+slots at `0x10000` and `0x400000`. This prevents an old copy in the inactive
+slot from returning after an OTA rollback while preserving the installed
+bootloader, partition table, NVS settings, and stored device data:
 
 ```bash
 ./scripts/flash.sh /dev/serial/by-id/YOUR_ESP32_SERIAL_DEVICE
@@ -102,7 +103,7 @@ For a blank board, or when the bootloader and partition table must also be
 restored, use this one firmware payload:
 
 ```text
-release/Marauder_Eternal_1.14.4_MiniV3_ESP32-C5.bin
+release/Marauder_Eternal_1.15.1_MiniV3_ESP32-C5.bin
 ```
 
 It is an 8 MB merged image containing the ESP32-C5 bootloader, partition
@@ -132,7 +133,8 @@ Windows. Packaged builds include the verified 8 MB full-device image and provide
 
 - automatic serial-port discovery with a manual selector;
 - selection of an included image or another compatible `.bin` file;
-- safe detection of full-device (`0x0`) and application (`0x10000`) images;
+- safe detection of full-device (`0x0`) and application images; application
+  images are written to both OTA slots (`0x10000` and `0x400000`);
 - a single **Connect & Flash** button;
 - ESP32-C5 identity checking before any write;
 - live percentage and progress-bar updates;
@@ -163,6 +165,21 @@ Install Arduino CLI and the Espressif ESP32 core version `3.3.4`, then run:
 The build uses only `firmware/MarauderEternal`, the custom partition table in
 that sketch, and the pinned libraries under `libraries/`. Output is written to
 `build/`.
+
+To regenerate the versioned release images, manifest, and checksums from a
+successful build, run:
+
+```bash
+python3 scripts/package_release.py build
+python3 scripts/package_release.py --verify
+```
+
+## Sensitive data and authorized use
+
+The Evil Portal feature stores submitted form values as plaintext in the
+device's capture output. Treat those files as sensitive, erase them when they
+are no longer needed, and use capture and active Wi-Fi features only on systems
+you own or are explicitly authorized to test.
 
 ## Layout
 

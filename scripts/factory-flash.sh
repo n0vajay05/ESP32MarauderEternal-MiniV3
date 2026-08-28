@@ -15,9 +15,10 @@ fi
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
 RELEASE_DIR="${PROJECT_DIR}/release"
-FULL_IMAGE_FILENAME="Marauder_Eternal_1.14.4_MiniV3_ESP32-C5.bin"
+MANIFEST="${RELEASE_DIR}/manifest.json"
+FULL_IMAGE_FILENAME="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["full_device_image"]["file"])' "${MANIFEST}")"
 FULL_IMAGE="${RELEASE_DIR}/${FULL_IMAGE_FILENAME}"
-FULL_IMAGE_SHA256="697a3cbfe472c84acb27a983b5d4efe3b06d5f45bf46c202332d67b04d8b8ab7"
+FULL_IMAGE_SHA256="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["full_device_image"]["sha256"])' "${MANIFEST}")"
 
 if [[ -n "${ESPTOOL_BIN:-}" ]]; then
   ESPTOOL="${ESPTOOL_BIN}"

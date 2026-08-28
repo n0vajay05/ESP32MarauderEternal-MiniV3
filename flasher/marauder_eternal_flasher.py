@@ -5,9 +5,11 @@ from __future__ import annotations
 
 import contextlib
 import hashlib
+import json
 import os
 import queue
 import re
+import struct
 import sys
 import threading
 import traceback
@@ -25,16 +27,41 @@ except ImportError:  # Shown as a useful GUI error instead of failing at import.
 
 
 APP_NAME = "Marauder Eternal Flasher"
-APP_VERSION = "1.1.3"
-FIRMWARE_VERSION = "1.14.4"
-INCLUDED_FILENAME = "Marauder_Eternal_1.14.4_MiniV3_ESP32-C5.bin"
-INCLUDED_SHA256 = "9ef3862a3a9adf76bfb31fb7fa5febe9b7235656498dbc1acc5c59156253eab1"
+
+
+def release_manifest_path() -> Path:
+    bundle_root = getattr(sys, "_MEIPASS", None)
+    if bundle_root:
+        return Path(bundle_root) / "firmware" / "manifest.json"
+    return Path(__file__).resolve().parents[1] / "release" / "manifest.json"
+
+
+def load_release_manifest() -> dict[str, object]:
+    path = release_manifest_path()
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError) as error:
+        raise RuntimeError(f"Release manifest is missing or invalid: {path}") from error
+
+
+RELEASE_MANIFEST = load_release_manifest()
+APP_VERSION = str(RELEASE_MANIFEST["flasher_version"])
+FIRMWARE_VERSION = str(RELEASE_MANIFEST["version"])
+INCLUDED_FILENAME = str(RELEASE_MANIFEST["full_device_image"]["file"])
+INCLUDED_SHA256 = str(RELEASE_MANIFEST["full_device_image"]["sha256"])
 FLASH_SIZE = 8 * 1024 * 1024
 APPLICATION_OFFSET = 0x10000
+APPLICATION_SLOT_OFFSETS = (0x10000, 0x400000)
 APPLICATION_LIMIT = 0x3D0000 - APPLICATION_OFFSET
 ESP_IMAGE_MAGIC = 0xE9
 ESP32_C5_IMAGE_ID = 0x17
 PARTITION_MAGIC = b"\xaa\x50"
+FIRMWARE_METADATA_MAGIC = b"MRDRFWID"
+FIRMWARE_METADATA_END_MAGIC = b"DIWFRDRM"
+FIRMWARE_METADATA_SCHEMA = 2
+EXPECTED_HARDWARE = "Marauder Eternal Mini V3"
+EXPECTED_CHIP = "esp32c5"
+EXPECTED_PARTITION_LAYOUT = "mini-v3-c5-8m-ota-v1"
 FLASH_BAUD = "460800"
 MIN_ACTIVITY_LINES = 7
 DEFAULT_WINDOW_WIDTH = 720
@@ -66,6 +93,7 @@ class FirmwareImage:
     size: int
     sha256: str
     included: bool = False
+    identity_verified: bool = True
 
     @property
     def offset_text(self) -> str:
@@ -76,8 +104,27 @@ class FirmwareImage:
         return f"{self.size / (1024 * 1024):.2f} MB"
 
     @property
+    def flash_offsets(self) -> tuple[int, ...]:
+        return APPLICATION_SLOT_OFFSETS if self.offset == APPLICATION_OFFSET else (self.offset,)
+
+    @property
     def detail(self) -> str:
+        if self.offset == APPLICATION_OFFSET:
+            offsets = " + ".join(f"0x{offset:x}" for offset in APPLICATION_SLOT_OFFSETS)
+            return f"{self.image_type}  •  {self.size_text}  •  writes at {offsets}"
         return f"{self.image_type}  •  {self.size_text}  •  writes at {self.offset_text}"
+
+
+class UnsafeFirmwareError(ValueError):
+    """Raised when an image is valid ESP firmware but lacks Eternal identity."""
+
+
+@dataclass(frozen=True)
+class FirmwareIdentity:
+    hardware: str
+    chip: str
+    version: str
+    partition_layout: str
 
 
 def resource_path() -> Path:
@@ -121,7 +168,84 @@ def _image_chip_id(header: bytes) -> int | None:
     return int.from_bytes(header[12:14], "little")
 
 
-def inspect_firmware(path: Path, included: bool = False) -> FirmwareImage:
+def _decode_metadata_field(value: bytes, name: str) -> str:
+    terminator = value.find(b"\x00")
+    if terminator <= 0:
+        raise UnsafeFirmwareError(f"Firmware {name} metadata is invalid.")
+    try:
+        return value[:terminator].decode("ascii")
+    except UnicodeDecodeError as error:
+        raise UnsafeFirmwareError(f"Firmware {name} metadata is invalid.") from error
+
+
+def read_firmware_identity(path: Path) -> FirmwareIdentity:
+    metadata_size = 128
+    overlap = b""
+    with path.open("rb") as firmware:
+        while chunk := firmware.read(64 * 1024):
+            data = overlap + chunk
+            search_from = 0
+            while True:
+                marker = data.find(FIRMWARE_METADATA_MAGIC, search_from)
+                if marker < 0:
+                    break
+                if marker + metadata_size <= len(data):
+                    candidate = data[marker : marker + metadata_size]
+                    if candidate[-8:] == FIRMWARE_METADATA_END_MAGIC:
+                        schema = candidate[8]
+                        if schema != FIRMWARE_METADATA_SCHEMA:
+                            raise UnsafeFirmwareError(
+                                f"Firmware metadata schema {schema} is not supported."
+                            )
+                        return FirmwareIdentity(
+                            _decode_metadata_field(candidate[12:60], "hardware"),
+                            _decode_metadata_field(candidate[60:72], "chip"),
+                            _decode_metadata_field(candidate[72:88], "version"),
+                            _decode_metadata_field(candidate[88:120], "partition layout"),
+                        )
+                search_from = marker + 1
+            overlap = data[-(metadata_size - 1) :]
+    raise UnsafeFirmwareError(
+        "The selected image is not identified as Marauder Eternal firmware."
+    )
+
+
+def validate_firmware_identity(path: Path) -> FirmwareIdentity:
+    identity = read_firmware_identity(path)
+    if identity.hardware != EXPECTED_HARDWARE or identity.chip != EXPECTED_CHIP:
+        raise UnsafeFirmwareError(
+            "The selected image targets a different Eternal device or chip."
+        )
+    if identity.partition_layout != EXPECTED_PARTITION_LAYOUT:
+        raise UnsafeFirmwareError(
+            "The selected image uses an incompatible Mini V3 partition layout."
+        )
+    return identity
+
+
+def validate_partition_table(prefix: bytes) -> None:
+    required = {
+        (0x00, 0x10, 0x10000, 0x3C0000),
+        (0x00, 0x11, 0x400000, 0x3C0000),
+    }
+    found: set[tuple[int, int, int, int]] = set()
+    offset = 0x8000
+    while offset + 32 <= len(prefix) and prefix[offset : offset + 2] == PARTITION_MAGIC:
+        _, partition_type, subtype, address, size = struct.unpack_from(
+            "<HBBII", prefix, offset
+        )
+        found.add((partition_type, subtype, address, size))
+        offset += 32
+    missing = required - found
+    if missing:
+        raise ValueError(
+            "The full-device image does not contain the required Mini V3 OTA partitions."
+        )
+
+
+def inspect_firmware(
+    path: Path, included: bool = False, allow_unsafe: bool = False
+) -> FirmwareImage:
     """Validate a C5 firmware image and safely determine its flash offset."""
     path = path.expanduser().resolve()
     if not path.is_file():
@@ -140,7 +264,7 @@ def inspect_firmware(path: Path, included: bool = False) -> FirmwareImage:
         validate_firmware(path)
 
     with path.open("rb") as firmware:
-        prefix = firmware.read(min(size, 0x8010))
+        prefix = firmware.read(min(size, 0x9000))
 
     is_full_image = (
         len(prefix) >= 0x8002
@@ -148,10 +272,25 @@ def inspect_firmware(path: Path, included: bool = False) -> FirmwareImage:
         and prefix[0x8000:0x8002] == PARTITION_MAGIC
     )
     if is_full_image:
+        if size != FLASH_SIZE:
+            raise ValueError(
+                "A Mini V3 full-device image must be exactly 8 MB."
+            )
         chip_id = _image_chip_id(prefix[0x2000:0x2020])
         if chip_id != ESP32_C5_IMAGE_ID:
             raise ValueError("The selected full-device image is not built for an ESP32-C5.")
-        return FirmwareImage(path, "Full-device image", 0x0, size, digest, included)
+        validate_partition_table(prefix)
+        try:
+            validate_firmware_identity(path)
+            identity_verified = True
+        except UnsafeFirmwareError:
+            if not allow_unsafe:
+                raise
+            identity_verified = False
+        return FirmwareImage(
+            path, "Full-device image", 0x0, size, digest, included,
+            identity_verified
+        )
 
     chip_id = _image_chip_id(prefix[:32])
     if chip_id is None:
@@ -169,7 +308,17 @@ def inspect_firmware(path: Path, included: bool = False) -> FirmwareImage:
         raise ValueError(
             f"The application image is too large for the {APPLICATION_LIMIT}-byte application partition."
         )
-    return FirmwareImage(path, "Application image", APPLICATION_OFFSET, size, digest, included)
+    try:
+        validate_firmware_identity(path)
+        identity_verified = True
+    except UnsafeFirmwareError:
+        if not allow_unsafe:
+            raise
+        identity_verified = False
+    return FirmwareImage(
+        path, "Application image", APPLICATION_OFFSET, size, digest, included,
+        identity_verified
+    )
 
 
 def strip_ansi(value: str) -> str:
@@ -344,6 +493,7 @@ class FlasherApp:
         self.port_by_label: dict[str, PortEntry] = {}
         self.flashing = False
         self.raw_output: list[str] = []
+        self.highest_progress = 0.0
         self.firmware = inspect_firmware(resource_path(), included=True)
 
         self.port_var = tk.StringVar()
@@ -635,10 +785,15 @@ class FlasherApp:
         return max(0, (self.log.winfo_height() - log_padding) // line_height)
 
     def _update_firmware_warning(self) -> None:
-        if self.firmware.offset == 0:
+        if not self.firmware.identity_verified:
+            message = (
+                "WARNING: Device identity was not verified. Flash only if you independently "
+                "confirmed this image and its partition layout."
+            )
+        elif self.firmware.offset == 0:
             message = "Full-device images replace boot data, partitions, the application, and saved settings."
         else:
-            message = "Application-only flashing preserves other regions and requires a compatible partition table."
+            message = "Application-only flashing writes both OTA slots and preserves saved settings."
         self.firmware_warning_var.set(message)
 
     def _select_firmware(self, firmware: FirmwareImage, display_path: str) -> None:
@@ -663,6 +818,20 @@ class FlasherApp:
             return
         try:
             firmware = inspect_firmware(Path(selected))
+        except UnsafeFirmwareError as error:
+            proceed = messagebox.askyesno(
+                APP_NAME,
+                f"{error}\n\nThis image cannot be verified as Eternal Mini V3 firmware. "
+                "Continue only if you independently trust it and know its partition layout.",
+                icon="warning",
+            )
+            if not proceed:
+                return
+            try:
+                firmware = inspect_firmware(Path(selected), allow_unsafe=True)
+            except Exception as unsafe_error:
+                messagebox.showerror(APP_NAME, str(unsafe_error))
+                return
         except Exception as error:
             messagebox.showerror(APP_NAME, str(error))
             return
@@ -721,6 +890,8 @@ class FlasherApp:
 
     def _set_progress(self, value: float) -> None:
         bounded = min(100.0, max(0.0, value))
+        bounded = max(self.highest_progress, bounded)
+        self.highest_progress = bounded
         self.progress_var.set(bounded)
         self.percent_var.set(f"{int(round(bounded))}%")
 
@@ -742,7 +913,11 @@ class FlasherApp:
             messagebox.showerror(APP_NAME, "Select a serial device before flashing.")
             return
         try:
-            firmware = inspect_firmware(self.firmware.path, included=self.firmware.included)
+            firmware = inspect_firmware(
+                self.firmware.path,
+                included=self.firmware.included,
+                allow_unsafe=not self.firmware.identity_verified,
+            )
         except Exception as error:
             messagebox.showerror(APP_NAME, str(error))
             return
@@ -755,6 +930,7 @@ class FlasherApp:
         self.log.delete("1.0", "end")
         self.log.configure(state="disabled")
         self.progress.configure(style="Flash.Horizontal.TProgressbar")
+        self.highest_progress = 0.0
         self._set_progress(0)
         self.status_label.configure(foreground=self.MUTED)
         self.status_var.set("Checking selected firmware…")
@@ -765,8 +941,12 @@ class FlasherApp:
         thread.start()
 
     def _flash_worker(self, port: str, firmware: FirmwareImage) -> None:
+        write_phase = 0
+        last_raw_percent = -1.0
+        write_passes = len(firmware.flash_offsets)
 
         def output(line: str) -> None:
+            nonlocal write_phase, last_raw_percent
             clean = strip_ansi(line).strip()
             if not clean:
                 return
@@ -774,8 +954,15 @@ class FlasherApp:
             self.events.put(("log", clean))
             raw_percent = extract_percent(clean)
             if raw_percent is not None:
+                if (last_raw_percent >= 90.0 and raw_percent <= 10.0 and
+                        write_phase < write_passes - 1):
+                    write_phase += 1
+                last_raw_percent = raw_percent
+                combined_percent = (
+                    (write_phase + raw_percent / 100.0) / write_passes
+                ) * 100.0
                 # Reserve 0–6% for validation/connection and 99–100% for verification/reset.
-                self.events.put(("progress", 6.0 + raw_percent * 0.93))
+                self.events.put(("progress", 6.0 + combined_percent * 0.93))
 
         try:
             if sha256_file(firmware.path) != firmware.sha256:
@@ -784,7 +971,11 @@ class FlasherApp:
             self.events.put(("status", f"Connecting to {port}…"))
             self.events.put(("log", f"Selected firmware: {firmware.path}"))
             self.events.put(("log", f"Image type: {firmware.image_type}"))
-            self.events.put(("log", f"Flash address: {firmware.offset_text}"))
+            self.events.put(
+                ("log", "Flash address(es): " + ", ".join(
+                    f"0x{offset:x}" for offset in firmware.flash_offsets
+                ))
+            )
             self.events.put(("log", f"Firmware SHA-256: {firmware.sha256}"))
             self.events.put(("log", f"Opening serial port: {port}"))
 
@@ -795,8 +986,7 @@ class FlasherApp:
             self.events.put(("progress", 6.0))
             self.events.put(("status", "ESP32-C5 connected — writing selected image…"))
 
-            invoke_esptool(
-                [
+            flash_arguments = [
                     "--chip",
                     "esp32c5",
                     "--port",
@@ -808,11 +998,10 @@ class FlasherApp:
                     "--after",
                     "hard-reset",
                     "write-flash",
-                    firmware.offset_text,
-                    str(firmware.path),
-                ],
-                output,
-            )
+            ]
+            for offset in firmware.flash_offsets:
+                flash_arguments.extend((f"0x{offset:x}", str(firmware.path)))
+            invoke_esptool(flash_arguments, output)
             self.events.put(("done", (True, "Firmware flashed and verified successfully.")))
         except Exception as error:  # Error details are surfaced in the activity panel.
             details = "\n".join(self.raw_output + [f"{type(error).__name__}: {error}"])

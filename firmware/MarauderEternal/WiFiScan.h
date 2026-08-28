@@ -260,65 +260,6 @@ esp_err_t esp_wifi_80211_tx(wifi_interface_t ifx, const void *buffer, int len, b
 #define VALID_ENTRY 1
 #define TOMBSTONE_ENTRY 2
 
-#ifdef HAS_BT
-
-#define IS_AIRTAG 0
-#define IS_FMNA   1
-#define IS_DULT   2
-static constexpr uint8_t AIRTAG_BEEP_COMMAND = 0xAF;
-
-static const NimBLEUUID& AIRTAG_SERVICE_UUID() {
-  static const NimBLEUUID uuid("7dfc9000-7d1c-4951-86aa-8d9728f8d66c");
-  return uuid;
-}
-
-static const NimBLEUUID& AIRTAG_CHARACTERISTIC_UUID() {
-  static const NimBLEUUID uuid("7dfc9001-7d1c-4951-86aa-8d9728f8d66c");
-  return uuid;
-}
-
-static const NimBLEUUID& FMNA_SERVICE_UUID() {
-  static const NimBLEUUID uuid("0000fd44-0000-1000-8000-00805f9b34fb");
-  return uuid;
-}
-
-static const NimBLEUUID& FMNA_SOUND_CHARACTERISTIC_UUID() {
-  static const NimBLEUUID uuid("4f860003-943b-49ef-bed4-2f730304427a");
-  return uuid;
-}
-
-static const NimBLEUUID& DULT_SERVICE_UUID() {
-  static const NimBLEUUID uuid("15190001-12f4-c226-88ed-2ac5579f2a85");
-  return uuid;
-}
-
-static const NimBLEUUID& DULT_SOUND_CHARACTERISTIC_UUID() {
-  static const NimBLEUUID uuid("8e0c0001-1d68-fb92-bf61-48377421680e");
-  return uuid;
-}
-
-static const uint8_t FMNA_START_SOUND_COMMAND[] = {
-    0x01, 0x00, 0x03
-};
-
-static const uint8_t FMNA_STOP_SOUND_COMMAND[] = {
-    0x01, 0x01, 0x03
-};
-
-static const uint8_t DULT_START_SOUND_COMMAND[] = {
-    0x00, 0x03
-};
-
-static const uint8_t DULT_STOP_SOUND_COMMAND[] = {
-    0x01, 0x03
-};
-
-static NimBLEAddress pendingAddress;
-
-bool connectionPending = false;
-bool operationInProgress = false;
-#endif
-
 #pragma pack(push, 1)
 struct MacEntry {
   uint8_t  mac[6];
@@ -410,18 +351,22 @@ class WiFiScan
       WiFiClientSecure *client = new WiFiClientSecure();
     #endif
   
-    int x_pos; //position along the graph x axis
-    float y_pos_x; //current graph y axis position of X value
-    float y_pos_x_old = 120; //old y axis position of X value
-    float y_pos_y; //current graph y axis position of Y value
-    float y_pos_y_old = 120; //old y axis position of Y value
-    float y_pos_z; //current graph y axis position of Z value
-    float y_pos_z_old = 120; //old y axis position of Z value
-    int midway = 0;
-    byte x_scale = 1; //scale of graph x axis, controlled by touchscreen buttons
-    byte y_scale = 1;
-
-    bool do_break = false;
+    #if defined(HAS_SCREEN) && defined(MARAUDER_MINI_V3) && !defined(DUAL_MINI_C5)
+      static const uint8_t PACKET_MONITOR_COLUMN_WIDTH = 4;
+      static const uint8_t PACKET_MONITOR_GRAPH_LEFT = 24;
+      static const uint16_t PACKET_MONITOR_REFRESH_MS = 200;
+      static const uint16_t PACKET_MONITOR_HISTORY_LEN =
+          (SCREEN_WIDTH - PACKET_MONITOR_GRAPH_LEFT) / PACKET_MONITOR_COLUMN_WIDTH;
+      uint16_t packet_monitor_beacons[PACKET_MONITOR_HISTORY_LEN] = {};
+      uint16_t packet_monitor_deauths[PACKET_MONITOR_HISTORY_LEN] = {};
+      uint16_t packet_monitor_probes[PACKET_MONITOR_HISTORY_LEN] = {};
+      void resetPacketMonitorGraph();
+      void samplePacketMonitorGraph();
+      void drawPacketMonitorGraph(const uint16_t *values, int16_t top, int16_t bottom,
+                                  uint16_t color, const char *label);
+      void drawPacketMonitorGraphs();
+      void drawPacketMonitorControls();
+    #endif
 
     bool wsl_bypass_enabled = false;
 
@@ -532,7 +477,7 @@ class WiFiScan
       "Winternet is Coming"
     };
 
-    char* prefix = "G";
+    const char* prefix = "G";
 
     typedef struct
     {
@@ -750,7 +695,10 @@ class WiFiScan
 
       WatchModel* watch_models = nullptr;
 
-      static void scanCompleteCB(BLEScanResults scanResults);
+      void startBleScan();
+      #ifndef HAS_NIMBLE_2
+        static void scanCompleteCB(BLEScanResults scanResults);
+      #endif
       NimBLEAdvertisementData GetUniversalAdvertisementData(EBLEPayloadType type);
     #endif
 
@@ -768,7 +716,11 @@ class WiFiScan
     bool wigleUpload(String filePath);
     bool wdgwarsUpload(String filePath);
     void writeSidecar(String filePath, String service);
-    bool sidecarExists(String filePath, String service); 
+    bool sidecarExists(String filePath, String service);
+    #ifdef HAS_SCREEN
+      void drawUploadProgress(const char* service, uint8_t percent,
+                              bool waiting = false);
+    #endif
 
     void runFoxHunt(uint32_t currentTime);
     void throwThatShitInACircle();
@@ -789,7 +741,7 @@ class WiFiScan
     void portScan(uint8_t scan_mode = WIFI_PORT_SCAN_ALL, uint16_t targ_port = 22);
     bool isHostAlive(IPAddress ip);
     bool checkHostPort(IPAddress ip, uint16_t port, uint16_t timeout = 100);
-    String extractManufacturer(const uint8_t* payload);
+    String extractManufacturer(const uint8_t* payload, size_t payload_len);
     int checkMatchAP(char addr[], bool update_ap = true);
     uint8_t getSecurityType(const uint8_t* beacon, uint16_t len);
     void addAnalyzerValue(int16_t value, int rssi_avg, int16_t target_array[], int array_size);
@@ -1016,7 +968,11 @@ class WiFiScan
         .cc = "PH",
         .schan = 1,
         .nchan = 13,
+        .max_tx_power = 20,
         .policy = WIFI_COUNTRY_POLICY_AUTO,
+#if CONFIG_SOC_WIFI_SUPPORT_5G
+        .wifi_5g_channel_mask = 0,
+#endif
       };
 
       wifi_init_config_t cfg2 = WIFI_INIT_CONFIG_DEFAULT();

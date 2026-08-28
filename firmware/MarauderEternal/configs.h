@@ -4,10 +4,10 @@
 
   #define configs_h
 
-  // Marauder Eternal 1.14.4 is intentionally restricted to the
+  // Marauder Eternal 1.15.1 is intentionally restricted to the
   // Marauder Mini V3 hardware built around the ESP32-C5.
   #if !defined(ARDUINO_ESP32C5_DEV)
-    #error "Marauder Eternal 1.14.4 requires the ESP32-C5 board target"
+    #error "Marauder Eternal 1.15.1 requires the ESP32-C5 board target"
   #endif
 
   #ifndef MARAUDER_MINI_V3
@@ -52,7 +52,8 @@
   #define JSON_SETTING_SIZE 2048
 
   #define MARAUDER_NAME "Marauder Eternal"
-  #define MARAUDER_VERSION "v1.14.4"
+  #define MARAUDER_VERSION "v1.15.1"
+  #define MARAUDER_PARTITION_LAYOUT "mini-v3-c5-8m-ota-v1"
 
   #define GRAPH_REFRESH   100
 
@@ -2084,8 +2085,8 @@
       #define TFT_DC 24
       #define TFT_RST -1
       #define TFT_BL 5
-      #define TOUCH_CS 21
-      #define SD_CS 4
+      #define TOUCH_CS -1
+      #define SD_CS 10
 
       #define SCREEN_BUFFER
 
@@ -2567,9 +2568,7 @@
       #define SD_CS 7
     #endif
 
-    #ifdef MARAUDER_MINI_V3
-      #define SD_CS 10
-    #endif
+    // MARAUDER_MINI_V3 defines SD_CS in its authoritative hardware block.
 
   #endif
   //// END SD DEFINITIONS

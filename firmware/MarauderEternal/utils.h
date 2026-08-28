@@ -224,8 +224,6 @@ inline IPAddress getPrevIP(IPAddress currentIP, IPAddress subnetMask, uint16_t s
   uint32_t maskInt = (subnetMask[0] << 24) | (subnetMask[1] << 16) | (subnetMask[2] << 8) | subnetMask[3];
 
   uint32_t networkBase = ipInt & maskInt;
-  uint32_t broadcast = networkBase | ~maskInt;
-
   uint32_t prevIP = ipInt - stepsBack;
 
   // Ensure prevIP is not below the usable range

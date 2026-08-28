@@ -251,7 +251,7 @@ class MenuFunctions
     void drawGraph(int16_t *values);
     void drawGraphSmall(uint8_t *values);
     void renderGraphUI(uint8_t scan_mode = 0);
-    void addNodes(Menu* menu, const char* name, uint8_t color, int place, std::function<void()> callable, bool selected = false);
+    void addNodes(Menu* menu, const char* name, uint8_t color, uint8_t place, std::function<void()> callable, bool selected = false);
     void confirmAction(const char* title, Menu* returnMenu,
                        std::function<void()> action);
     void confirmBLEAction(const char* title, std::function<void()> action);

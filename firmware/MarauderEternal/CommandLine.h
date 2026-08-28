@@ -54,6 +54,10 @@ const char PROGMEM UPDATE_CMD[] = "update";
 const char PROGMEM HELP_CMD[] = "help";
 const char PROGMEM SETTINGS_CMD[] = "settings";
 const char PROGMEM LS_CMD[] = "ls";
+const char PROGMEM PROTOCOL_INFO_CMD[] = "protocolinfo";
+const char PROGMEM BACKUP_SPIFFS_CMD[] = "backupspiffs";
+const char PROGMEM BACKUP_STATUS_CMD[] = "backupstatus";
+const char PROGMEM RESTORE_SPIFFS_CMD[] = "restorespiffs";
 const char PROGMEM LED_CMD[] = "led";
 const char PROGMEM GPS_DATA_CMD[] = "gpsdata";
 const char PROGMEM GPS_CMD[] = "gps";
@@ -133,6 +137,10 @@ const char PROGMEM HELP_REBOOT_CMD[] = "reboot";
 const char PROGMEM HELP_UPDATE_CMD_A[] = "update -s/-w";
 const char PROGMEM HELP_SETTINGS_CMD[] = "settings [-s <setting> enable/disable>]/[-r]";
 const char PROGMEM HELP_LS_CMD[] = "ls <directory>";
+const char PROGMEM HELP_PROTOCOL_INFO_CMD[] = "protocolinfo [--machine <transaction-id>]";
+const char PROGMEM HELP_BACKUP_SPIFFS_CMD[] = "backupspiffs [--machine <transaction-id>] - copy SPIFFS to /spiffs on SD";
+const char PROGMEM HELP_BACKUP_STATUS_CMD[] = "backupstatus [--machine <transaction-id>] - inspect /spiffs on SD";
+const char PROGMEM HELP_RESTORE_SPIFFS_CMD[] = "restorespiffs [--machine <transaction-id>] - restore SPIFFS from /spiffs on SD";
 const char PROGMEM HELP_LED_CMD[] = "led -s <hex color>/-p <rainbow>";
 const char PROGMEM HELP_GPS_DATA_CMD[] = "gpsdata";
 const char PROGMEM HELP_GPS_CMD[] = "gps [-t] [-g] <fix/sat/lon/lat/alt/date/accuracy/text/nmea>\r\n    [-n] <native/all/gps/glonass/galileo/navic/qzss/beidou>\r\n         [-b = use BD vs GB for beidou]";
@@ -212,11 +220,14 @@ const char PROGMEM HELP_FOOT[] = "==================================";
 class CommandLine {
   private:
     String getSerialInput();
-    LinkedList<String> parseCommand(String input, char* delim);
+    LinkedList<String> parseCommand(String input, const char* delim);
     String toLowerCase(String str);
     void filterAccessPoints(String filter);
     void runCommand(String input);
     bool checkValueExists(LinkedList<String>* cmd_args_list, int index);
+    bool argumentValue(LinkedList<String>* cmd_args_list, int flag_index,
+                       const char* flag, String& value);
+    bool integerValue(String value, int& result, const char* label);
     bool inRange(int max, int index);
     //bool apSelected();
     bool hasSSIDs();

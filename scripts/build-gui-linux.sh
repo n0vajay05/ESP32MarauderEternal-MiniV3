@@ -21,5 +21,5 @@ cd "${PROJECT_DIR}"
   "${PROJECT_DIR}/flasher/MarauderEternalFlasher.spec"
 
 "${DIST_DIR}/MarauderEternalFlasher" --self-test
-sha256sum "${DIST_DIR}/MarauderEternalFlasher" > "${DIST_DIR}/SHA256SUMS"
+(cd "${DIST_DIR}" && sha256sum MarauderEternalFlasher > SHA256SUMS)
 echo "Linux application: ${DIST_DIR}/MarauderEternalFlasher"

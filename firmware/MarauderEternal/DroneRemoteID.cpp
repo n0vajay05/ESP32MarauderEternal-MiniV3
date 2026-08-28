@@ -553,7 +553,7 @@ void drawDetail(uint8_t selected, uint8_t page) {
     display_obj.tft.setTextColor(TFT_YELLOW, TFT_BLACK);
     display_obj.tft.drawString("Messages / description", 2, 20, 1);
     display_obj.tft.setTextColor(TFT_WHITE, TFT_BLACK);
-    char messageFlags[16]{};
+    char messageFlags[19]{};
     snprintf(messageFlags, sizeof(messageFlags), "B%c L%c A%c S%c Y%c O%c",
              (drone.messagesSeen & (1 << BASIC_ID)) ? '+' : '-',
              (drone.messagesSeen & (1 << LOCATION)) ? '+' : '-',

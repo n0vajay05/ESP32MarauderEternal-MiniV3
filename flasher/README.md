@@ -2,7 +2,7 @@
 
 This is a one-click desktop flasher for the Marauder Mini V3 with an ESP32-C5
 and 8 MB flash. Packaged applications include the verified Marauder Eternal
-1.14.4 full-device image and also allow the user to choose another `.bin`.
+1.15.1 full-device image and also allow the user to choose another `.bin`.
 
 ## Use the application
 
@@ -19,8 +19,9 @@ and 8 MB flash. Packaged applications include the verified Marauder Eternal
 The app validates the selected image, detects its safe address, requires an
 ESP32-C5 response before writing, shows live write progress, and reports a
 specific reason for common failures. Recognized full-device images are written
-at `0x0`; ESP32-C5 application images are written at `0x10000`. Individual
-bootloader, partition-table, and boot metadata files are rejected.
+at `0x0`; ESP32-C5 application images are written to both OTA slots at
+`0x10000` and `0x400000`. Individual bootloader, partition-table, and boot
+metadata files are rejected.
 
 The included full-device image replaces all 8 MB of flash and erases existing
 settings and logs. Application-only images preserve the other flash regions

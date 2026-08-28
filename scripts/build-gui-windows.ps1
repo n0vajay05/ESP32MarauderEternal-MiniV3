@@ -22,8 +22,11 @@ try {
         --workpath $WorkDir `
         (Join-Path $ProjectDir "flasher\MarauderEternalFlasher.spec")
     & (Join-Path $DistDir "MarauderEternalFlasher.exe") --self-test
-    Get-FileHash (Join-Path $DistDir "MarauderEternalFlasher.exe") -Algorithm SHA256 |
-        Format-List | Out-File (Join-Path $DistDir "SHA256SUMS.txt")
+    $FlasherHash = (Get-FileHash `
+        (Join-Path $DistDir "MarauderEternalFlasher.exe") `
+        -Algorithm SHA256).Hash.ToLowerInvariant()
+    "$FlasherHash  MarauderEternalFlasher.exe" |
+        Set-Content -Encoding ascii (Join-Path $DistDir "SHA256SUMS.txt")
 } finally {
     Pop-Location
 }

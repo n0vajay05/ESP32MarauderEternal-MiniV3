@@ -1,0 +1,52 @@
+name: Build Mini V3 firmware
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - "firmware/**"
+      - "libraries/**"
+      - "scripts/build.sh"
+      - "scripts/package_release.py"
+      - "scripts/test-native.sh"
+      - "tests/native/**"
+      - "release/manifest.json"
+      - "release/SHA256SUMS"
+      - ".github/workflows/build-firmware.yml"
+  pull_request:
+    paths:
+      - "firmware/**"
+      - "libraries/**"
+      - "scripts/build.sh"
+      - "scripts/test-native.sh"
+      - "tests/native/**"
+      - ".github/workflows/build-firmware.yml"
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: arduino/setup-arduino-cli@v2
+      - name: Install ESP32 Arduino core
+        shell: bash
+        run: |
+          arduino-cli config init --overwrite
+          arduino-cli config add board_manager.additional_urls https://espressif.github.io/arduino-esp32/package_esp32_index.json
+          arduino-cli core update-index
+          arduino-cli core install esp32:esp32@3.3.4
+      - name: Build firmware
+        run: ./scripts/build.sh build/ci
+      - name: Test native helpers
+        run: ./scripts/test-native.sh
+      - name: Verify checked-in release
+        run: python3 scripts/package_release.py --verify
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Marauder-Eternal-MiniV3-build
+          path: |
+            build/ci/MarauderEternal.ino.bin
+            build/ci/MarauderEternal.ino.bootloader.bin
+            build/ci/MarauderEternal.ino.partitions.bin
+            build/ci/MarauderEternal.ino.merged.bin
+          if-no-files-found: error

@@ -6,7 +6,8 @@ on:
     paths:
       - "flasher/**"
       - "scripts/build-gui-*"
-      - "release/Marauder_Eternal_1.14.4_MiniV3_ESP32-C5.bin"
+      - "release/*.bin"
+      - "release/manifest.json"
       - ".github/workflows/build-flasher.yml"
 
 jobs:
@@ -33,7 +34,11 @@ jobs:
       - name: Install dependencies
         run: python -m pip install -r flasher/requirements-build.txt
       - name: Test
-        run: python -m unittest discover -v
+        shell: bash
+        run: |
+          python -m unittest discover -v
+          python scripts/package_release.py --verify
+          bash scripts/test-native.sh
       - name: Build
         run: >-
           pyinstaller --clean --noconfirm

@@ -399,8 +399,6 @@ void setup()
     settings_obj.createDefaultSettings(SPIFFS);
   }
 
-  buffer_obj = Buffer();
-
   #ifndef HAS_SIMPLEX_DISPLAY
     #if defined(HAS_SD)
       // Do some SD stuff

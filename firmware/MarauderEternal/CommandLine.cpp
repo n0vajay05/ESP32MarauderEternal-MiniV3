@@ -1,5 +1,50 @@
 #include "CommandLine.h"
 
+#include <errno.h>
+#include <limits.h>
+
+namespace {
+  bool validTransactionId(const String& transaction_id) {
+    if (transaction_id.length() == 0 || transaction_id.length() > 40)
+      return false;
+
+    for (size_t i = 0; i < transaction_id.length(); i++) {
+      char c = transaction_id.charAt(i);
+      if (!((c >= '0' && c <= '9') || (c >= 'A' && c <= 'Z') ||
+            (c >= 'a' && c <= 'z') || c == '-' || c == '_' || c == '.'))
+        return false;
+    }
+    return true;
+  }
+
+  void machineResult(
+    const String& transaction_id,
+    const char* command,
+    const char* status,
+    const char* code,
+    size_t files = 0,
+    size_t bytes = 0,
+    bool rebooting = false
+  ) {
+    Serial.printf(
+      "@MARAUDER:{\"protocol\":1,\"tx\":\"%s\",\"command\":\"%s\","
+      "\"status\":\"%s\",\"code\":\"%s\",\"files\":%u,\"bytes\":%u,"
+      "\"rebooting\":%s}\n",
+      transaction_id.c_str(), command, status, code,
+      static_cast<unsigned int>(files), static_cast<unsigned int>(bytes),
+      rebooting ? "true" : "false"
+    );
+  }
+
+  const char* storageErrorCode(uint8_t error, const char* fallback) {
+    if (error == 1)
+      return "SD_NOT_READY";
+    if (error == 2)
+      return "BACKUP_NOT_FOUND";
+    return fallback;
+  }
+}
+
 // Brightness functions defined in esp32_marauder.ino
 #if !defined(HAS_MINI_SCREEN) || defined(MARAUDER_MINI_V3)
   extern void brightnessCycle();
@@ -38,7 +83,7 @@ void CommandLine::main(uint32_t currentTime) {
     Serial.print("> ");
 }
 
-LinkedList<String> CommandLine::parseCommand(String input, char* delim) {
+LinkedList<String> CommandLine::parseCommand(String input, const char* delim) {
   LinkedList<String> cmd_args;
 
   bool inQuote = false;
@@ -91,10 +136,49 @@ int CommandLine::argSearch(LinkedList<String>* cmd_args_list, const char* key) {
 }
 
 bool CommandLine::checkValueExists(LinkedList<String>* cmd_args_list, int index) {
-  if (index < cmd_args_list->size() - 1)
-    return true;
-    
-  return false;
+  return cmd_args_list != nullptr && index >= 0 &&
+         index < cmd_args_list->size() - 1;
+}
+
+bool CommandLine::argumentValue(LinkedList<String>* cmd_args_list,
+                                int flag_index, const char* flag,
+                                String& value) {
+  if (!checkValueExists(cmd_args_list, flag_index)) {
+    Serial.print(F("Missing value after "));
+    Serial.println(flag == nullptr ? "option" : flag);
+    return false;
+  }
+  value = cmd_args_list->get(flag_index + 1);
+  if (value.length() == 0) {
+    Serial.print(F("Empty value after "));
+    Serial.println(flag == nullptr ? "option" : flag);
+    return false;
+  }
+  return true;
+}
+
+bool CommandLine::integerValue(String value, int& result, const char* label) {
+  value.trim();
+  if (value.length() == 0) {
+    Serial.print(F("Missing numeric value for "));
+    Serial.println(label == nullptr ? "argument" : label);
+    return false;
+  }
+
+  errno = 0;
+  char* end = nullptr;
+  const long parsed = strtol(value.c_str(), &end, 10);
+  if (errno == ERANGE || end == value.c_str() || *end != '\0' ||
+      parsed < INT_MIN || parsed > INT_MAX) {
+    Serial.print(F("Invalid numeric value for "));
+    Serial.print(label == nullptr ? "argument" : label);
+    Serial.print(F(": "));
+    Serial.println(value);
+    return false;
+  }
+
+  result = static_cast<int>(parsed);
+  return true;
 }
 
 bool CommandLine::inRange(int max, int index) {
@@ -232,6 +316,10 @@ void CommandLine::runCommand(String input) {
     Serial.println(HELP_REBOOT_CMD);
     Serial.println(HELP_UPDATE_CMD_A);
     Serial.println(HELP_LS_CMD);
+    Serial.println(HELP_PROTOCOL_INFO_CMD);
+    Serial.println(HELP_BACKUP_SPIFFS_CMD);
+    Serial.println(HELP_BACKUP_STATUS_CMD);
+    Serial.println(HELP_RESTORE_SPIFFS_CMD);
     Serial.println(HELP_LED_CMD);
     Serial.println(HELP_GPS_DATA_CMD);
     Serial.println(HELP_GPS_CMD);
@@ -394,7 +482,9 @@ void CommandLine::runCommand(String input) {
         int nmea_arg = this->argSearch(&cmd_args, "-n");
 
         if (get_arg != -1) {
-          String gps_info = cmd_args.get(get_arg + 1);
+          String gps_info;
+          if (!this->argumentValue(&cmd_args, get_arg, "-g", gps_info))
+            return;
 
           if (gps_info == "fix")
             Serial.println("Fix: " + gps_obj.getFixStatusAsString());
@@ -432,7 +522,9 @@ void CommandLine::runCommand(String input) {
             Serial.println(F("You did not provide a valid argument"));
         }
         else if(nmea_arg != -1){
-          String nmea_type = cmd_args.get(nmea_arg + 1);
+          String nmea_type;
+          if (!this->argumentValue(&cmd_args, nmea_arg, "-n", nmea_type))
+            return;
 
           if (nmea_type == "native" || nmea_type == "all" || nmea_type == "gps" || nmea_type == "glonass"
               || nmea_type == "galileo" || nmea_type == "navic" || nmea_type == "qzss" || nmea_type == "beidou"){
@@ -471,11 +563,13 @@ void CommandLine::runCommand(String input) {
   }
   // LED command
   else if (cmd_args.get(0) == LED_CMD) {
-    int hex_arg = this->argSearch(&cmd_args, "-s");
-    int pat_arg = this->argSearch(&cmd_args, "-p");
     #if defined(PIN) && defined(HAS_NEOPIXEL_LED) 
+      int hex_arg = this->argSearch(&cmd_args, "-s");
+      int pat_arg = this->argSearch(&cmd_args, "-p");
       if (hex_arg != -1) {
-        String hexstring = cmd_args.get(hex_arg + 1);
+        String hexstring;
+        if (!this->argumentValue(&cmd_args, hex_arg, "-s", hexstring))
+          return;
         int number = (int)strtol(&hexstring[1], NULL, 16);
         int r = number >> 16;
         int g = number >> 8 & 0xFF;
@@ -487,7 +581,9 @@ void CommandLine::runCommand(String input) {
         led_obj.setMode(MODE_CUSTOM);
       }
       else if (pat_arg != -1) {
-        String pat_name = cmd_args.get(pat_arg + 1);
+        String pat_name;
+        if (!this->argumentValue(&cmd_args, pat_arg, "-p", pat_name))
+          return;
         pat_name.toLowerCase();
         if (pat_name == "rainbow") {
           led_obj.setMode(MODE_RAINBOW);
@@ -503,13 +599,124 @@ void CommandLine::runCommand(String input) {
     #endif
   }
 
+  else if (cmd_args.get(0) == PROTOCOL_INFO_CMD) {
+    int machine_arg = this->argSearch(&cmd_args, "--machine");
+    String transaction_id = machine_arg >= 0 && machine_arg + 1 < cmd_args.size()
+      ? cmd_args.get(machine_arg + 1) : "";
+    if (machine_arg >= 0 && !validTransactionId(transaction_id))
+      machineResult(transaction_id, PROTOCOL_INFO_CMD, "error", "INVALID_TRANSACTION");
+    else if (machine_arg >= 0) {
+      #ifdef HAS_SD
+        Serial.printf(
+          "@MARAUDER:{\"protocol\":1,\"tx\":\"%s\",\"command\":\"protocolinfo\","
+          "\"status\":\"success\",\"code\":\"OK\",\"firmware\":\"%s\","
+          "\"capabilities\":[\"spiffs-backup\",\"spiffs-backup-status\","
+          "\"spiffs-restore\"],\"backupPath\":\"/spiffs\"}\n",
+          transaction_id.c_str(), version_number.c_str()
+        );
+      #else
+        Serial.printf(
+          "@MARAUDER:{\"protocol\":1,\"tx\":\"%s\",\"command\":\"protocolinfo\","
+          "\"status\":\"success\",\"code\":\"OK\",\"firmware\":\"%s\","
+          "\"capabilities\":[]}\n",
+          transaction_id.c_str(), version_number.c_str()
+        );
+      #endif
+    }
+    else {
+      #ifdef HAS_SD
+        Serial.println(F("SPIFFS migration protocol 1; backup path: /spiffs"));
+      #else
+        Serial.println(F("SPIFFS migration unavailable: SD not supported"));
+      #endif
+    }
+  }
+
+  else if (cmd_args.get(0) == BACKUP_SPIFFS_CMD ||
+           cmd_args.get(0) == BACKUP_STATUS_CMD ||
+           cmd_args.get(0) == RESTORE_SPIFFS_CMD) {
+    uint8_t operation = cmd_args.get(0) == BACKUP_SPIFFS_CMD ? 0 :
+                        cmd_args.get(0) == BACKUP_STATUS_CMD ? 1 : 2;
+    const char* command = operation == 0 ? BACKUP_SPIFFS_CMD :
+                          operation == 1 ? BACKUP_STATUS_CMD : RESTORE_SPIFFS_CMD;
+    int machine_arg = this->argSearch(&cmd_args, "--machine");
+    String transaction_id = machine_arg >= 0 && machine_arg + 1 < cmd_args.size()
+      ? cmd_args.get(machine_arg + 1) : "";
+    bool machine = machine_arg >= 0;
+    if (machine && !validTransactionId(transaction_id)) {
+      machineResult(transaction_id, command, "error", "INVALID_TRANSACTION");
+      return;
+    }
+
+    #ifdef HAS_SD
+      size_t files = 0;
+      size_t bytes = 0;
+      uint8_t error = 0;
+      if (machine && operation != 1)
+        machineResult(transaction_id, command, "started", "OK");
+      else if (!machine && operation != 1)
+        Serial.printf("SPIFFS %s started\n", operation == 0 ? "backup" : "restore");
+
+      bool success = sd_obj.migrateSPIFFS(operation, files, bytes, error);
+      if (machine) {
+        if (success)
+          machineResult(transaction_id, command, "success", "OK", files,
+                        bytes, operation == 2);
+        else {
+          const char* fallback = operation == 0 ? "BACKUP_FAILED" :
+                                 operation == 1 ? "BACKUP_INSPECTION_FAILED" :
+                                                  "RESTORE_FAILED";
+          machineResult(transaction_id, command, "error",
+                        storageErrorCode(error, fallback));
+        }
+      }
+      else if (success) {
+        const char* action = operation == 0 ? "backup complete" :
+                             operation == 1 ? "backup status" : "restore complete";
+        Serial.printf("SPIFFS %s: %u files, %u bytes%s\n", action,
+                      static_cast<unsigned int>(files),
+                      static_cast<unsigned int>(bytes),
+                      operation == 2 ? "; rebooting" : "");
+      }
+      else {
+        const char* fallback = operation == 0 ? "BACKUP_FAILED" :
+                               operation == 1 ? "BACKUP_INSPECTION_FAILED" :
+                                                "RESTORE_FAILED";
+        Serial.printf("SPIFFS %s failed: %s\n",
+                      operation == 0 ? "backup" :
+                      operation == 1 ? "backup status" : "restore",
+                      storageErrorCode(error, fallback));
+      }
+
+      if (success && operation == 2) {
+        delay(1000);
+        ESP.restart();
+      }
+    #else
+      if (machine)
+        machineResult(transaction_id, command, "error", "SD_NOT_SUPPORTED");
+      else
+        Serial.println(F("SD Card NOT Supported"));
+    #endif
+  }
+
   // Channel command
   else if (cmd_args.get(0) == CH_CMD) {
     // Search for channel set arg
     int ch_set = this->argSearch(&cmd_args, "-s");
 
     if (ch_set != -1) {
-      wifi_scan_obj.set_channel = cmd_args.get(ch_set + 1).toInt();
+      String channel_value;
+      if (!this->argumentValue(&cmd_args, ch_set, "-s", channel_value))
+        return;
+      int channel = 0;
+      if (!this->integerValue(channel_value, channel, "channel"))
+        return;
+      if (channel < 1 || channel > 196) {
+        Serial.println(F("Channel is outside the supported range"));
+        return;
+      }
+      wifi_scan_obj.set_channel = channel;
       wifi_scan_obj.changeChannel();
       Serial.println(wifi_scan_obj.set_channel);
     }
@@ -546,7 +753,9 @@ void CommandLine::runCommand(String input) {
   else if (cmd_args.get(0) == UPLOAD_CMD) {
     #ifdef HAS_DIRECT_UPLOAD
       int dest_sw = this->argSearch(&cmd_args, "-d");
-      String upload_dest_arg = cmd_args.get(dest_sw + 1);
+      String upload_dest_arg;
+      if (!this->argumentValue(&cmd_args, dest_sw, "-d", upload_dest_arg))
+        return;
       int upload_dest = -1;
 
       if (upload_dest_arg == "wdg")
@@ -606,7 +815,9 @@ void CommandLine::runCommand(String input) {
     }
     else {
       bool result = false;
-      String setting_name = cmd_args.get(ss_sw + 1);
+      String setting_name;
+      if (!this->argumentValue(&cmd_args, ss_sw, "-s", setting_name))
+        return;
       if (en_sw != -1)
         result = settings_obj.saveSetting<bool>(setting_name.c_str(), true);
       else if (da_sw != -1)
@@ -635,8 +846,13 @@ void CommandLine::runCommand(String input) {
       int bt_sw = this->argSearch(&cmd_args, "-b");
       int wf_sw = this->argSearch(&cmd_args, "-w");
       if (wf_sw > -1) {
-        int targ_index = cmd_args.get(wf_sw + 1).toInt();
-        if (targ_index < access_points->size()) {
+        String target_value;
+        if (!this->argumentValue(&cmd_args, wf_sw, "-w", target_value))
+          return;
+        int targ_index = -1;
+        if (!this->integerValue(target_value, targ_index, "AP index"))
+          return;
+        if (this->inRange(access_points->size(), targ_index)) {
           for (int i = 0; i < access_points->size(); i++) {
             AccessPoint access_point = access_points->get(i);
             access_point.selected = (i == targ_index);
@@ -646,8 +862,13 @@ void CommandLine::runCommand(String input) {
         }
       }
       else if (bt_sw > -1) {
-        int targ_index = cmd_args.get(bt_sw + 1).toInt();
-        if (targ_index < ble_devices->size()) {
+        String target_value;
+        if (!this->argumentValue(&cmd_args, bt_sw, "-b", target_value))
+          return;
+        int targ_index = -1;
+        if (!this->integerValue(target_value, targ_index, "BLE index"))
+          return;
+        if (this->inRange(ble_devices->size(), targ_index)) {
           for (int i = 0; i < ble_devices->size(); i++) {
             BleDevice ble_device = ble_devices->get(i);
             ble_device.selected = (i == targ_index);
@@ -680,7 +901,12 @@ void CommandLine::runCommand(String input) {
         return;
       }
 
-      int pr_index = cmd_args.get(pr_sw + 1).toInt();
+      String probe_value;
+      if (!this->argumentValue(&cmd_args, pr_sw, "-p", probe_value))
+        return;
+      int pr_index = -1;
+      if (!this->integerValue(probe_value, pr_index, "probe SSID index"))
+        return;
 
       if ((pr_index < 0) || (pr_index > probe_req_ssids->size() - 1)) {
         return;
@@ -708,7 +934,9 @@ void CommandLine::runCommand(String input) {
       int html_sw = this->argSearch(&cmd_args, "-w");
 
       if (cmd_sw != -1) {
-        String et_command = cmd_args.get(cmd_sw + 1);
+        String et_command;
+        if (!this->argumentValue(&cmd_args, cmd_sw, "-c", et_command))
+          return;
         if (et_command == "start") {
           Serial.print(F("Starting Evil Portal. Stop with "));
           Serial.println(STOPSCAN_CMD);
@@ -717,7 +945,10 @@ void CommandLine::runCommand(String input) {
             menu_function_obj.drawStatusBar();
           #endif
           if (html_sw != -1) {
-            String target_html_name = cmd_args.get(html_sw + 1);
+            String target_html_name;
+            if (!this->argumentValue(&cmd_args, html_sw, "-w",
+                                     target_html_name))
+              return;
             evil_portal_obj.target_html_name = target_html_name;
             evil_portal_obj.using_serial_html = false;
             Serial.print(F("Set html file as "));
@@ -735,6 +966,10 @@ void CommandLine::runCommand(String input) {
           
         }
         else if (et_command == "sethtml") {
+          if (cmd_sw + 2 >= cmd_args.size()) {
+            Serial.println(F("Missing HTML filename after sethtml"));
+            return;
+          }
           String target_html_name = cmd_args.get(cmd_sw + 2);
           evil_portal_obj.target_html_name = target_html_name;
           evil_portal_obj.using_serial_html = false;
@@ -745,7 +980,14 @@ void CommandLine::runCommand(String input) {
           evil_portal_obj.setHtmlFromSerial();
         }
         else if (et_command == "setap") {
-          int target_ap_index = cmd_args.get(cmd_sw + 2).toInt();
+          if (cmd_sw + 2 >= cmd_args.size()) {
+            Serial.println(F("Missing AP index after setap"));
+            return;
+          }
+          int target_ap_index = -1;
+          if (!this->integerValue(cmd_args.get(cmd_sw + 2), target_ap_index,
+                                  "AP index"))
+            return;
           if ((target_ap_index >= 0) && (target_ap_index < access_points->size())) {
             evil_portal_obj.setAP(access_points->get(target_ap_index).essid);
             AccessPoint new_ap = access_points->get(target_ap_index);
@@ -807,7 +1049,17 @@ void CommandLine::runCommand(String input) {
       }
       
       if (ch_sw != -1) {
-        wifi_scan_obj.set_channel = cmd_args.get(ch_sw + 1).toInt();
+        String channel_value;
+        if (!this->argumentValue(&cmd_args, ch_sw, "-c", channel_value))
+          return;
+        int channel = 0;
+        if (!this->integerValue(channel_value, channel, "channel"))
+          return;
+        if (channel < 1 || channel > 196) {
+          Serial.println(F("Channel is outside the supported range"));
+          return;
+        }
+        wifi_scan_obj.set_channel = channel;
         wifi_scan_obj.changeChannel();
         Serial.println("Set channel: " + (String)wifi_scan_obj.set_channel);
         
@@ -866,7 +1118,12 @@ void CommandLine::runCommand(String input) {
         return;
       }
 
-      int ap_index = cmd_args.get(ap_sw + 1).toInt();
+      String ap_value;
+      if (!this->argumentValue(&cmd_args, ap_sw, "-a", ap_value))
+        return;
+      int ap_index = -1;
+      if (!this->integerValue(ap_value, ap_index, "AP index"))
+        return;
 
       if ((ap_index < 0) || (ap_index > access_points->size() - 1)) {
         return;
@@ -877,8 +1134,7 @@ void CommandLine::runCommand(String input) {
           display_obj.clearScreen();
           menu_function_obj.drawStatusBar();
         #endif
-        int filter_ap = cmd_args.get(ap_sw + 1).toInt();
-        wifi_scan_obj.RunSetMac(access_points->get(filter_ap).bssid, true);
+        wifi_scan_obj.RunSetMac(access_points->get(ap_index).bssid, true);
       }
     }
 
@@ -889,7 +1145,12 @@ void CommandLine::runCommand(String input) {
       if (cl_sw == -1)
         return;
 
-      int sta_index = cmd_args.get(cl_sw + 1).toInt();
+      String station_value;
+      if (!this->argumentValue(&cmd_args, cl_sw, "-s", station_value))
+        return;
+      int sta_index = -1;
+      if (!this->integerValue(station_value, sta_index, "station index"))
+        return;
 
       if ((sta_index < 0) || (sta_index > stations->size() - 1)) {
         return;
@@ -900,8 +1161,7 @@ void CommandLine::runCommand(String input) {
           display_obj.clearScreen();
           menu_function_obj.drawStatusBar();
         #endif
-        int filter_sta = cmd_args.get(cl_sw + 1).toInt();
-        wifi_scan_obj.RunSetMac(stations->get(filter_sta).mac, false);
+        wifi_scan_obj.RunSetMac(stations->get(sta_index).mac, false);
       }
     }
     //// End MAC Address commands    (Added by H4W9_4)
@@ -921,7 +1181,10 @@ void CommandLine::runCommand(String input) {
       if (attack_type_switch == -1)
         return;
       else {
-        String attack_type = cmd_args.get(attack_type_switch + 1);
+        String attack_type;
+        if (!this->argumentValue(&cmd_args, attack_type_switch, "-t",
+                                 attack_type))
+          return;
   
         // Branch on attack type
         if (attack_type == ATTACK_TYPE_DEAUTH) {
@@ -932,7 +1195,11 @@ void CommandLine::runCommand(String input) {
           }
           // Dest addr specified
           else if (dst_addr_sw != -1) {
-            wifi_scan_obj.dst_mac = cmd_args.get(dst_addr_sw + 1);
+            String destination_mac;
+            if (!this->argumentValue(&cmd_args, dst_addr_sw, "-d",
+                                     destination_mac))
+              return;
+            wifi_scan_obj.dst_mac = destination_mac;
             Serial.println("Sending to " + wifi_scan_obj.dst_mac + "...");
           }
           // Station list specified
@@ -959,9 +1226,18 @@ void CommandLine::runCommand(String input) {
           }
           // Source addr specified
           else {
-            String src_mac_str = cmd_args.get(src_addr_sw + 1);
-            sscanf(src_mac_str.c_str(), "%2hhx:%2hhx:%2hhx:%2hhx:%2hhx:%2hhx", 
-              &wifi_scan_obj.src_mac[0], &wifi_scan_obj.src_mac[1], &wifi_scan_obj.src_mac[2], &wifi_scan_obj.src_mac[3], &wifi_scan_obj.src_mac[4], &wifi_scan_obj.src_mac[5]);
+            String src_mac_str;
+            if (!this->argumentValue(&cmd_args, src_addr_sw, "-s",
+                                     src_mac_str))
+              return;
+            if (sscanf(src_mac_str.c_str(),
+                       "%2hhx:%2hhx:%2hhx:%2hhx:%2hhx:%2hhx",
+                       &wifi_scan_obj.src_mac[0], &wifi_scan_obj.src_mac[1],
+                       &wifi_scan_obj.src_mac[2], &wifi_scan_obj.src_mac[3],
+                       &wifi_scan_obj.src_mac[4], &wifi_scan_obj.src_mac[5]) != 6) {
+              Serial.println(F("Source MAC must be XX:XX:XX:XX:XX:XX"));
+              return;
+            }
 
             #ifdef HAS_SCREEN
               display_obj.clearScreen();
@@ -1088,7 +1364,9 @@ void CommandLine::runCommand(String input) {
 
         // Specifying type of bluetooth sniff
         if (bt_type_sw != -1) {
-          String bt_type = cmd_args.get(bt_type_sw + 1);
+          String bt_type;
+          if (!this->argumentValue(&cmd_args, bt_type_sw, "-t", bt_type))
+            return;
 
           bt_type.toLowerCase();
 
@@ -1122,8 +1400,13 @@ void CommandLine::runCommand(String input) {
       int at_sw = this->argSearch(&cmd_args, "-t");
       if (at_sw != -1) {
         #ifdef HAS_BT
-          int target_mac = cmd_args.get(at_sw + 1).toInt();
-          if (target_mac < airtags->size()) {
+          String target_value;
+          if (!this->argumentValue(&cmd_args, at_sw, "-t", target_value))
+            return;
+          int target_mac = -1;
+          if (!this->integerValue(target_value, target_mac, "AirTag index"))
+            return;
+          if (this->inRange(airtags->size(), target_mac)) {
             for (int i = 0; i < airtags->size(); i++) {
               AirTag at = airtags->get(i);
               if (i == target_mac)
@@ -1145,8 +1428,13 @@ void CommandLine::runCommand(String input) {
       int index_sw = this->argSearch(&cmd_args, "-t");
 
       if (index_sw != -1) {
-        int targ_index = cmd_args.get(index_sw + 1).toInt();
-        if (targ_index < airtags->size()) {
+        String target_value;
+        if (!this->argumentValue(&cmd_args, index_sw, "-t", target_value))
+          return;
+        int targ_index = -1;
+        if (!this->integerValue(target_value, targ_index, "AirTag index"))
+          return;
+        if (this->inRange(airtags->size(), targ_index)) {
           for (int x = 0; x < airtags->size(); x++) {
             AirTag new_atx = airtags->get(x);
             if (x != targ_index)
@@ -1164,7 +1452,9 @@ void CommandLine::runCommand(String input) {
     else if (cmd_args.get(0) == BT_SPAM_CMD) {
       int bt_type_sw = this->argSearch(&cmd_args, "-t");
       if (bt_type_sw != -1) {
-        String bt_type = cmd_args.get(bt_type_sw + 1);
+        String bt_type;
+        if (!this->argumentValue(&cmd_args, bt_type_sw, "-t", bt_type))
+          return;
 
         #ifdef HAS_BT
           if (bt_type == "sourapple") {
@@ -1224,8 +1514,14 @@ void CommandLine::runCommand(String input) {
         if (c_arg != -1) {
           brightnessCycle();
         } else if (s_arg != -1) {
-          uint8_t lvl = cmd_args.get(s_arg + 1).toInt();
-          if (lvl < 10) {
+          String level_value;
+          if (!this->argumentValue(&cmd_args, s_arg, "-s", level_value))
+            return;
+          int level = -1;
+          if (!this->integerValue(level_value, level, "brightness"))
+            return;
+          if (level >= 0 && level < 10) {
+            uint8_t lvl = static_cast<uint8_t>(level);
             brightnessSave(lvl);
             Serial.print(F("[Brightness] Set to level "));
             Serial.println(lvl);
@@ -1343,10 +1639,15 @@ void CommandLine::runCommand(String input) {
 
       // Check they specified ip index
       if (ip_sw != -1) {
-        int ip_index = cmd_args.get(ip_sw + 1).toInt();
+        String ip_value;
+        if (!this->argumentValue(&cmd_args, ip_sw, "-t", ip_value))
+          return;
+        int ip_index = -1;
+        if (!this->integerValue(ip_value, ip_index, "IP index"))
+          return;
 
         // Check provided index is in list
-        if (ip_index < ipList->size()) {
+        if (this->inRange(ipList->size(), ip_index)) {
 
           // Full port scan
           if (all_sw != -1) {
@@ -1360,7 +1661,9 @@ void CommandLine::runCommand(String input) {
         }
       }
       else if (port_sw != -1) {
-        String port_name = cmd_args.get(port_sw + 1);
+        String port_name;
+        if (!this->argumentValue(&cmd_args, port_sw, "-s", port_name))
+          return;
         port_name.toUpperCase();
         uint8_t target_mode = 0;
         if (port_name == "SSH")
@@ -1477,7 +1780,16 @@ void CommandLine::runCommand(String input) {
     int ap_sw = this->argSearch(&cmd_args, "-a");
 
     if (ap_sw != -1) {
-      int filter_ap = cmd_args.get(ap_sw + 1).toInt();
+      String ap_value;
+      if (!this->argumentValue(&cmd_args, ap_sw, "-a", ap_value))
+        return;
+      int filter_ap = -1;
+      if (!this->integerValue(ap_value, filter_ap, "AP index"))
+        return;
+      if (!this->inRange(access_points->size(), filter_ap)) {
+        Serial.println(F("AP index is out of range"));
+        return;
+      }
       wifi_scan_obj.RunAPInfo(filter_ap, false);
     }
     else {
@@ -1494,10 +1806,20 @@ void CommandLine::runCommand(String input) {
     int s_sw  = this->argSearch(&cmd_args, "-s");
 
     if ((ap_sw != -1) && (pw_sw != -1)) {
-      int index = cmd_args.get(ap_sw + 1).toInt();
-      String password = cmd_args.get(pw_sw + 1);
+      String ap_value;
+      String password;
+      if (!this->argumentValue(&cmd_args, ap_sw, "-a", ap_value) ||
+          !this->argumentValue(&cmd_args, pw_sw, "-p", password))
+        return;
+      int index = -1;
+      if (!this->integerValue(ap_value, index, "AP index"))
+        return;
+      if (!this->inRange(access_points->size(), index)) {
+        Serial.println(F("AP index is out of range"));
+        return;
+      }
       AccessPoint access_point = access_points->get(index);
-      Serial.println("Using SSID: " + (String)access_point.essid + " Password: " + (String)password);
+      Serial.println("Using SSID: " + (String)access_point.essid);
       //wifi_scan_obj.currentScanMode = LV_JOIN_WIFI;
       //wifi_scan_obj.StartScan(LV_JOIN_WIFI, TFT_YELLOW); 
       wifi_scan_obj.joinWiFi(access_point.essid, password, false);
@@ -1541,30 +1863,28 @@ void CommandLine::runCommand(String input) {
 
       // If the filters parameter was specified
       if (filter_sw != -1) {
-        String filter_ap = cmd_args.get(filter_sw + 1);
+        String filter_ap;
+        if (!this->argumentValue(&cmd_args, filter_sw, "-f", filter_ap))
+          return;
         this->filterAccessPoints(filter_ap);
       } else {
+        String ap_value;
+        if (!this->argumentValue(&cmd_args, ap_sw, "-a", ap_value))
+          return;
         // Get list of indices
-        LinkedList<String> ap_index = this->parseCommand(cmd_args.get(ap_sw + 1), ",");
+        LinkedList<String> ap_index = this->parseCommand(ap_value, ",");
 
         // Select ALL APs
-        if (cmd_args.get(ap_sw + 1) == "all") {
+        if (ap_value == "all") {
+          bool all_selected = access_points->size() > 0;
+          for (int i = 0; i < access_points->size(); i++)
+            all_selected = all_selected && access_points->get(i).selected;
+          const bool select = !all_selected;
           for (int i = 0; i < access_points->size(); i++) {
             AccessPoint access_point = access_points->get(i);
-            if (access_point.selected) {
-              // Unselect "selected" ap
-              AccessPoint new_ap = access_point;
-              new_ap.selected = false;
-              access_points->set(i, new_ap);
-              count_unselected += 1;
-            }
-            else {
-              // Select "unselected" ap
-              AccessPoint new_ap = access_point;
-              new_ap.selected = true;
-              access_points->set(i, new_ap);
-              count_selected += 1;
-            }
+            access_point.selected = select;
+            access_points->set(i, access_point);
+            select ? count_selected++ : count_unselected++;
           }
           this->showCounts(count_selected, count_unselected);
         }
@@ -1572,13 +1892,15 @@ void CommandLine::runCommand(String input) {
         else {
           // Mark APs as selected
           for (int i = 0; i < ap_index.size(); i++) {
-            int index = ap_index.get(i).toInt();
-            AccessPoint access_point = access_points->get(index);
+            int index = -1;
+            if (!this->integerValue(ap_index.get(i), index, "AP index"))
+              continue;
             if (!this->inRange(access_points->size(), index)) {
               Serial.print(F("Index not in range: "));
               Serial.println(index);
               continue;
             }
+            AccessPoint access_point = access_points->get(index);
             if (access_point.selected) {
               // Unselect "selected" ap
               AccessPoint new_ap = access_point;
@@ -1599,26 +1921,27 @@ void CommandLine::runCommand(String input) {
       }
     }
     else if (cl_sw != -1) {
-      LinkedList<String> sta_index = this->parseCommand(cmd_args.get(cl_sw + 1), ",");
+      String station_value;
+      if (!this->argumentValue(&cmd_args, cl_sw, "-c", station_value))
+        return;
+      LinkedList<String> sta_index = this->parseCommand(station_value, ",");
       
       // Select all Stations
-      if (cmd_args.get(cl_sw + 1) == "all") {
+      if (station_value == "all") {
+        bool all_selected = stations->size() > 0;
+        for (int i = 0; i < stations->size(); i++)
+          all_selected = all_selected && stations->get(i).selected;
+        const bool select = !all_selected;
         for (int i = 0; i < stations->size(); i++) {
           Station station = stations->get(i);
-          if (station.selected) {
-            // Unselect "selected" ap
-            Station new_sta = station;
-            new_sta.selected = false;
-            stations->set(i, new_sta);
-            count_unselected += 1;
+          station.selected = select;
+          stations->set(i, station);
+          if (select && this->inRange(access_points->size(), station.ap)) {
+            AccessPoint access_point = access_points->get(station.ap);
+            access_point.selected = true;
+            access_points->set(station.ap, access_point);
           }
-          else {
-            // Select "unselected" ap
-            Station new_sta = station;
-            new_sta.selected = true;
-            stations->set(i, new_sta);
-            count_selected += 1;
-          }
+          select ? count_selected++ : count_unselected++;
         }
         this->showCounts(count_selected, count_unselected);
       }
@@ -1626,13 +1949,15 @@ void CommandLine::runCommand(String input) {
       else {
         // Mark Stations as selected
         for (int i = 0; i < sta_index.size(); i++) {
-          int index = sta_index.get(i).toInt();
-          Station station = stations->get(index);
+          int index = -1;
+          if (!this->integerValue(sta_index.get(i), index, "station index"))
+            continue;
           if (!this->inRange(stations->size(), index)) {
             Serial.print(F("Index not in range: "));
             Serial.println(index);
             continue;
           }
+          Station station = stations->get(index);
           if (station.selected) {
             // Unselect "selected" ap
             Station new_sta = station;
@@ -1645,6 +1970,11 @@ void CommandLine::runCommand(String input) {
             Station new_sta = station;
             new_sta.selected = true;
             stations->set(index, new_sta);
+            if (this->inRange(access_points->size(), new_sta.ap)) {
+              AccessPoint access_point = access_points->get(new_sta.ap);
+              access_point.selected = true;
+              access_points->set(new_sta.ap, access_point);
+            }
             count_selected += 1;
           }
         }
@@ -1653,30 +1983,31 @@ void CommandLine::runCommand(String input) {
     }
     // select ssids
     else if (ss_sw != -1) {
+      String ssid_value;
+      if (!this->argumentValue(&cmd_args, ss_sw, "-s", ssid_value))
+        return;
       // Get list of indices
-      LinkedList<String> ss_index = this->parseCommand(cmd_args.get(ss_sw + 1), ",");
+      LinkedList<String> ss_index = this->parseCommand(ssid_value, ",");
 
       // Select ALL SSIDs
-      if (cmd_args.get(ss_sw + 1) == "all") {
+      if (ssid_value == "all") {
+        bool all_selected = ssids->size() > 0;
+        for (int i = 0; i < ssids->size(); i++)
+          all_selected = all_selected && ssids->get(i).selected;
+        const bool select = !all_selected;
         for (int i = 0; i < ssids->size(); i++) {
-          if (ssids->get(i).selected) {
-            ssid new_ssid = ssids->get(i);
-            new_ssid.selected = false;
-            ssids->set(i, new_ssid);
-            count_unselected += 1;
-          }
-          else {
-            ssid new_ssid = ssids->get(i);
-            new_ssid.selected = true;
-            ssids->set(i, new_ssid);
-            count_selected += 1;
-          }
+          ssid new_ssid = ssids->get(i);
+          new_ssid.selected = select;
+          ssids->set(i, new_ssid);
+          select ? count_selected++ : count_unselected++;
         }
       }
       else {
       // Mark SSIDs as selected
         for (int i = 0; i < ss_index.size(); i++) {
-          int index = ss_index.get(i).toInt();
+          int index = -1;
+          if (!this->integerValue(ss_index.get(i), index, "SSID index"))
+            continue;
           if (!this->inRange(ssids->size(), index)) {
             Serial.print(F("Index not in range: "));
             Serial.println(index);
@@ -1747,7 +2078,9 @@ void CommandLine::runCommand(String input) {
         return;
       }
 
-      String mac_str = cmd_args.get(bssid_sw + 1);
+      String mac_str;
+      if (!this->argumentValue(&cmd_args, bssid_sw, "-b", mac_str))
+        return;
       uint8_t mac[6];
       if (sscanf(mac_str.c_str(), "%2hhx:%2hhx:%2hhx:%2hhx:%2hhx:%2hhx",
              &mac[0], &mac[1], &mac[2], &mac[3], &mac[4], &mac[5]) != 6) {
@@ -1776,15 +2109,27 @@ void CommandLine::runCommand(String input) {
 
       int ch_sw = this->argSearch(&cmd_args, "-ch");
       uint8_t channel = 1;
-      if (ch_sw != -1 && this->checkValueExists(&cmd_args, ch_sw))
-        channel = cmd_args.get(ch_sw + 1).toInt();
+      if (ch_sw != -1) {
+        String channel_value;
+        if (!this->argumentValue(&cmd_args, ch_sw, "-ch", channel_value))
+          return;
+        int requested_channel = 0;
+        if (!this->integerValue(channel_value, requested_channel, "channel"))
+          return;
+        if (requested_channel < 1 || requested_channel > 196) {
+          Serial.println(F("Channel is outside the supported range"));
+          return;
+        }
+        channel = static_cast<uint8_t>(requested_channel);
+      }
 
       int essid_sw = this->argSearch(&cmd_args, "-e");
       String essid = mac_str;
-      if (essid_sw != -1 && this->checkValueExists(&cmd_args, essid_sw))
-        essid = cmd_args.get(essid_sw + 1);
+      if (essid_sw != -1 &&
+          !this->argumentValue(&cmd_args, essid_sw, "-e", essid))
+        return;
 
-      AccessPoint ap;
+      AccessPoint ap{};
       ap.essid = essid;
       ap.channel = channel;
       memcpy(ap.bssid, mac, 6);
@@ -1801,6 +2146,7 @@ void CommandLine::runCommand(String input) {
       ap.has_msg_2 = false;
       ap.has_msg_3 = false;
       ap.has_msg_4 = false;
+      ap.last_seen_ms = millis();
 
       access_points->add(ap);
 
@@ -1825,14 +2171,21 @@ void CommandLine::runCommand(String input) {
         return;
       }
 
-      int ap_index = cmd_args.get(ap_idx_sw + 1).toInt();
+      String ap_value;
+      if (!this->argumentValue(&cmd_args, ap_idx_sw, "-ap", ap_value))
+        return;
+      int ap_index = -1;
+      if (!this->integerValue(ap_value, ap_index, "AP index"))
+        return;
       if (!this->inRange(access_points->size(), ap_index)) {
         Serial.print(F("AP index not in range: "));
         Serial.println(ap_index);
         return;
       }
 
-      String mac_str = cmd_args.get(bssid_sw + 1);
+      String mac_str;
+      if (!this->argumentValue(&cmd_args, bssid_sw, "-b", mac_str))
+        return;
       uint8_t mac[6];
       if (sscanf(mac_str.c_str(), "%2hhx:%2hhx:%2hhx:%2hhx:%2hhx:%2hhx",
              &mac[0], &mac[1], &mac[2], &mac[3], &mac[4], &mac[5]) != 6) {
@@ -1867,6 +2220,7 @@ void CommandLine::runCommand(String input) {
 
       // Link station to AP
       AccessPoint ap = access_points->get(ap_index);
+      ap.selected = true;
       ap.stations->add(stations->size() - 1);
       access_points->set(ap_index, ap);
 
@@ -1894,12 +2248,23 @@ void CommandLine::runCommand(String input) {
     if (add_sw != -1) {
       // Generate random
       if (gen_sw != -1) {
-        int gen_count = cmd_args.get(gen_sw + 1).toInt();
+        String count_value;
+        if (!this->argumentValue(&cmd_args, gen_sw, "-g", count_value))
+          return;
+        int gen_count = 0;
+        if (!this->integerValue(count_value, gen_count, "SSID count"))
+          return;
+        if (gen_count < 1 || gen_count > 256) {
+          Serial.println(F("SSID generation count must be 1-256"));
+          return;
+        }
         wifi_scan_obj.generateSSIDs(gen_count);
       }
       // Add specific
       else if (spc_sw != -1) {
-        String essid = cmd_args.get(spc_sw + 1);
+        String essid;
+        if (!this->argumentValue(&cmd_args, spc_sw, "-n", essid))
+          return;
         wifi_scan_obj.addSSID(essid);
       }
       else {
@@ -1908,7 +2273,12 @@ void CommandLine::runCommand(String input) {
     }
     // Remove SSID
     else if (rem_sw != -1) {
-      int index = cmd_args.get(rem_sw + 1).toInt();
+      String index_value;
+      if (!this->argumentValue(&cmd_args, rem_sw, "-r", index_value))
+        return;
+      int index = -1;
+      if (!this->integerValue(index_value, index, "SSID index"))
+        return;
       if (!this->inRange(ssids->size(), index)) {
         Serial.print(F("Index not in range: "));
         Serial.println(index);

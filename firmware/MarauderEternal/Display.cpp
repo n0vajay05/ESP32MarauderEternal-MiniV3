@@ -1,4 +1,5 @@
 #include "Display.h"
+#include "DisplayLine.h"
 #include "lang_var.h"
 
 #ifdef HAS_SCREEN
@@ -181,7 +182,7 @@ void Display::setCalData(bool landscape) {
         uint16_t calData[5] = { 272, 3648, 234, 3565, 7 };
       #elif defined(MARAUDER_V8)
         uint16_t calData[5] = { 213, 3396, 350, 3275, 1 };
-      #else if defined(TFT_DIY)
+      #elif defined(TFT_DIY)
         uint16_t calData[5] = { 213, 3469, 320, 3446, 1 }; // Landscape TFT DIY
       #endif
       #ifdef HAS_ILI9341
@@ -577,17 +578,12 @@ void Display::processAndPrintString(TFT_eSPI& tft, const String& originalString)
     }
   }
 
-  int count = TFT_WIDTH / CHAR_WIDTH;
-
-  char buf[count + 1];
-  memset(buf, ' ', count);
-  buf[count] = '\0';
-
-  String spaces(buf);
+  char line[STANDARD_FONT_CHAR_LIMIT + 1];
+  fitDisplayLine(line, sizeof(line), new_string.c_str());
 
   // Set text color and print the string
   tft.setTextColor(text_color, background_color);
-  tft.print(new_string + spaces);
+  tft.print(line);
 }
 
 void Display::displayBuffer(bool do_clear)
@@ -654,10 +650,13 @@ void Display::showCenterText(const char* text, int y, bool small_pp, uint8_t tex
   if (!text)
     text = "";
 
+  const uint8_t effective_text_size = resolveDisplayTextSize(small_pp, text_size);
+  tft.setTextSize(effective_text_size);
+
   size_t len = strlen(text);
 
   if (!small_pp)
-    tft.setCursor((SCREEN_WIDTH - (len * (6 * text_size))) / 2, y);
+    tft.setCursor((SCREEN_WIDTH - (len * (6 * effective_text_size))) / 2, y);
   else
     tft.setCursor((SCREEN_WIDTH - (len * 6)) / 2, y);
 
@@ -673,8 +672,6 @@ void Display::updateBanner(String msg)
 
 void Display::buildBanner(String msg, int xpos)
 {
-  int h = TEXT_HEIGHT;
-
   #if defined(MARAUDER_CARDPUTER) || defined(MARAUDER_CARDPUTER_ADV)
     int banner_y = STATUS_BAR_WIDTH + 8;
   #else

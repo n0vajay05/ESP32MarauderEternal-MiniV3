@@ -40,7 +40,7 @@ extern Buffer buffer_obj;
 extern char apName[MAX_AP_NAME_SIZE];
 
 #ifndef HAS_PSRAM
-  char index_html[MAX_HTML_SIZE] = "TEST";
+  extern char index_html[MAX_HTML_SIZE];
 #else
   extern char* index_html;
 #endif
@@ -88,7 +88,15 @@ public:
   bool canHandle(AsyncWebServerRequest *request) { return true; }
 
   void handleRequest(AsyncWebServerRequest *request) {
-    request->send_P(200, "text/html", index_html);
+    #ifdef HAS_PSRAM
+      if (index_html == nullptr) {
+        request->send(503, "text/plain", "Portal content is not loaded");
+        return;
+      }
+      request->send(200, "text/html", index_html);
+    #else
+      request->send_P(200, "text/html", index_html);
+    #endif
   }
 };
 
@@ -116,6 +124,7 @@ class EvilPortal {
     void sendToDisplay(String msg);
     void loadCredentials();
     bool storeCredential(const String& username, const String& password);
+    bool installHtml(const char* html, size_t length);
 
   public:
     int ap_index = -1;
@@ -136,6 +145,7 @@ class EvilPortal {
     String get_user_name();
     String get_password();
     bool setAP(String essid);
+    bool setAPFromConfig();
     void setup();
     bool begin(LinkedList<ssid>* ssids, LinkedList<AccessPoint>* access_points);
     void main(uint8_t scan_mode);

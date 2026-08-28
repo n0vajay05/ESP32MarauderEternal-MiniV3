@@ -1,6 +1,120 @@
 #include "SDInterface.h"
 #include "lang_var.h"
 
+namespace {
+  bool removeTree(fs::FS& fs, const String& path, bool keep_root = false) {
+    if (!fs.exists(path))
+      return true;
+
+    File node = fs.open(path);
+    if (!node)
+      return false;
+
+    if (!node.isDirectory()) {
+      node.close();
+      return fs.remove(path);
+    }
+
+    File child = node.openNextFile();
+    while (child) {
+      String child_path = child.path();
+      child.close();
+      if (!removeTree(fs, child_path)) {
+        node.close();
+        return false;
+      }
+      child = node.openNextFile();
+    }
+
+    node.close();
+    return keep_root || fs.rmdir(path);
+  }
+
+  String joinPath(const String& base, const String& child) {
+    return base == "/" ? "/" + child : base + "/" + child;
+  }
+
+  bool copyTree(
+    fs::FS& source,
+    const String& source_path,
+    fs::FS* destination,
+    const String& destination_path,
+    size_t& files_copied,
+    size_t& bytes_copied,
+    uint8_t& error
+  ) {
+    File source_node = source.open(source_path);
+    if (!source_node) {
+      error = 3;
+      return false;
+    }
+
+    if (!source_node.isDirectory()) {
+      if (destination) {
+        File destination_file = destination->open(destination_path, FILE_WRITE);
+        if (!destination_file) {
+          source_node.close();
+          error = 3;
+          return false;
+        }
+
+        uint8_t buffer[512];
+        while (source_node.available()) {
+          size_t bytes_read = source_node.read(buffer, sizeof(buffer));
+          if (bytes_read == 0 || destination_file.write(buffer, bytes_read) != bytes_read) {
+            source_node.close();
+            destination_file.close();
+            error = 3;
+            return false;
+          }
+          bytes_copied += bytes_read;
+        }
+        destination_file.close();
+      }
+      else
+        bytes_copied += source_node.size();
+      source_node.close();
+      files_copied++;
+      return true;
+    }
+
+    if (destination && destination_path != "/" &&
+        !destination->exists(destination_path) && !destination->mkdir(destination_path)) {
+      source_node.close();
+      error = 3;
+      return false;
+    }
+
+    File child = source_node.openNextFile();
+    while (child) {
+      String child_source_path = child.path();
+      String child_name = child_source_path;
+      if (child_name.startsWith(source_path))
+        child_name.remove(0, source_path.length());
+      while (child_name.startsWith("/"))
+        child_name.remove(0, 1);
+      child.close();
+
+      if (!copyTree(
+        source,
+        child_source_path,
+        destination,
+        joinPath(destination_path, child_name),
+        files_copied,
+        bytes_copied,
+        error
+      )) {
+        source_node.close();
+        return false;
+      }
+      child = source_node.openNextFile();
+    }
+
+    source_node.close();
+    return true;
+  }
+}
+
 #ifdef HAS_C5_SD
   SDInterface::SDInterface(SPIClass* spi, int cs)
     : _spi(spi), _cs(cs) {}
@@ -98,6 +212,7 @@ File SDInterface::getFile(String path) {
     //if (file)
     return file;
   }
+  return File();
 }
 
 bool SDInterface::removeFile(String file_path) {
@@ -105,6 +220,100 @@ bool SDInterface::removeFile(String file_path) {
     return true;
   else
     return false;
+}
+
+bool SDInterface::migrateSPIFFS(uint8_t operation, size_t& files_copied,
+                                size_t& bytes_copied, uint8_t& error) {
+  files_copied = bytes_copied = error = 0;
+
+  if (!this->supported) {
+    error = 1;
+    return false;
+  }
+
+  const String backup_path = "/spiffs";
+  File backup = SD.open(backup_path);
+  bool valid_backup = backup && backup.isDirectory();
+  backup.close();
+
+  if (operation == 1) {
+    if (!valid_backup) {
+      error = 2;
+      return false;
+    }
+    return copyTree(SD, backup_path, nullptr, "", files_copied,
+                    bytes_copied, error);
+  }
+
+  if (operation == 2) {
+    if (!valid_backup) {
+      error = 2;
+      return false;
+    }
+
+    const String rollback_path = "/spiffs.restore-rollback";
+    if (!removeTree(SD, rollback_path)) {
+      error = 3;
+      return false;
+    }
+
+    size_t rollback_files = 0;
+    size_t rollback_bytes = 0;
+    uint8_t rollback_error = 0;
+    if (!copyTree(SPIFFS, "/", &SD, rollback_path, rollback_files,
+                  rollback_bytes, rollback_error)) {
+      removeTree(SD, rollback_path);
+      error = 3;
+      return false;
+    }
+
+    bool cleared = removeTree(SPIFFS, "/", true);
+    if (cleared && copyTree(SD, backup_path, &SPIFFS, "/", files_copied,
+                            bytes_copied, error)) {
+      removeTree(SD, rollback_path);
+      return true;
+    }
+
+    removeTree(SPIFFS, "/", true);
+    size_t recovered_files = 0;
+    size_t recovered_bytes = 0;
+    uint8_t recovery_error = 0;
+    copyTree(SD, rollback_path, &SPIFFS, "/", recovered_files,
+             recovered_bytes, recovery_error);
+    removeTree(SD, rollback_path);
+    error = 3;
+    return false;
+  }
+
+  const String staging_path = "/spiffs.tmp";
+  const String previous_path = "/spiffs.previous";
+
+  if (!removeTree(SD, staging_path) || !removeTree(SD, previous_path)) {
+    error = 3;
+    return false;
+  }
+
+  if (!copyTree(SPIFFS, "/", &SD, staging_path, files_copied,
+                bytes_copied, error)) {
+    removeTree(SD, staging_path);
+    return false;
+  }
+
+  if (SD.exists(backup_path) && !SD.rename(backup_path, previous_path)) {
+    removeTree(SD, staging_path);
+    error = 3;
+    return false;
+  }
+
+  if (!SD.rename(staging_path, backup_path)) {
+    if (SD.exists(previous_path))
+      SD.rename(previous_path, backup_path);
+    error = 3;
+    return false;
+  }
+
+  removeTree(SD, previous_path);
+  return true;
 }
 
 void SDInterface::listDirToLinkedList(LinkedList<String>* file_names, String str_dir, String ext) {
@@ -190,11 +399,18 @@ void SDInterface::runUpdate(String file_name) {
     size_t updateSize = updateBin.size();
 
     if (updateSize > 0) {
+      if (!this->validateUpdate(updateBin)) {
+        updateBin.close();
+        return;
+      }
       #ifdef HAS_SCREEN
         display_obj.tft.println(F(text_table2[1]));
       #endif
       Serial.println(F("Starting update over SD. Please wait..."));
-      this->performUpdate(updateBin, updateSize);
+      if (!this->performUpdate(updateBin, updateSize)) {
+        updateBin.close();
+        return;
+      }
     }
     else {
       #ifdef HAS_SCREEN
@@ -205,6 +421,7 @@ void SDInterface::runUpdate(String file_name) {
       #ifdef HAS_SCREEN
         display_obj.tft.setTextColor(TFT_WHITE);
       #endif
+      updateBin.close();
       return;
     }
 
@@ -214,12 +431,8 @@ void SDInterface::runUpdate(String file_name) {
     #ifdef HAS_SCREEN
       display_obj.tft.println(F(text_table2[3]));
     #endif
-    const esp_partition_t *running = esp_ota_get_running_partition();
-
-    const esp_partition_t *next = esp_ota_get_next_update_partition(NULL);
-
-    esp_err_t result = esp_ota_set_boot_partition(next);
-     
+    // Update.end() validates the image and selects the partition written by
+    // Update.begin(). Selecting "next" again here can choose a different slot.
     ESP.restart();
   }
   else {
@@ -234,7 +447,82 @@ void SDInterface::runUpdate(String file_name) {
   }
 }
 
-void SDInterface::performUpdate(Stream &updateSource, size_t updateSize) {
+bool SDInterface::validateUpdate(File &updateBin) {
+  constexpr size_t ESP_IMAGE_HEADER_SIZE = 24;
+  constexpr uint8_t ESP_IMAGE_MAGIC = 0xe9;
+  constexpr uint16_t ESP32_C5_IMAGE_ID = 0x17;
+  constexpr size_t APPLICATION_PARTITION_SIZE = 0x3c0000;
+
+  if (updateBin.size() < ESP_IMAGE_HEADER_SIZE ||
+      updateBin.size() > APPLICATION_PARTITION_SIZE) {
+    Serial.println(F("Rejected SD update: image size does not fit app partition"));
+    return false;
+  }
+
+  uint8_t image_header[ESP_IMAGE_HEADER_SIZE];
+  updateBin.seek(0);
+  if (updateBin.read(image_header, sizeof(image_header)) !=
+          static_cast<int>(sizeof(image_header)) ||
+      image_header[0] != ESP_IMAGE_MAGIC ||
+      (static_cast<uint16_t>(image_header[12]) |
+       (static_cast<uint16_t>(image_header[13]) << 8)) !=
+          ESP32_C5_IMAGE_ID) {
+    updateBin.seek(0);
+    Serial.println(F("Rejected SD update: invalid ESP32-C5 application header"));
+    return false;
+  }
+
+  MarauderFirmware::MetadataScanner scanner;
+  uint8_t buffer[512];
+  updateBin.seek(0);
+
+  while (updateBin.available() && !scanner.found()) {
+    size_t bytes_read = updateBin.read(buffer, sizeof(buffer));
+    for (size_t i = 0; i < bytes_read && !scanner.found(); i++)
+      scanner.push(buffer[i]);
+  }
+
+  updateBin.seek(0);
+
+  if (!scanner.found()) {
+    #ifdef HAS_SCREEN
+      display_obj.tft.setTextColor(TFT_RED);
+      display_obj.tft.println(F("Rejected: invalid image"));
+      display_obj.tft.setTextColor(TFT_WHITE);
+    #endif
+    Serial.println(F("Rejected SD update: Eternal firmware identity not found"));
+    return false;
+  }
+
+  const MarauderFirmware::Metadata &candidate = scanner.metadata();
+  const MarauderFirmware::Metadata &current = MarauderFirmware::currentMetadata();
+  if (!MarauderFirmware::metadataMatches(candidate, current)) {
+    #ifdef HAS_SCREEN
+      display_obj.tft.setTextColor(TFT_RED);
+      display_obj.tft.println(F("Rejected: wrong device"));
+      display_obj.tft.setTextColor(TFT_WHITE);
+    #endif
+    Serial.print(F("Rejected SD update: expected "));
+    Serial.print(current.hardware);
+    Serial.print(F("/"));
+    Serial.print(current.chip);
+    Serial.print(F(", got "));
+    Serial.print(candidate.hardware);
+    Serial.print(F("/"));
+    Serial.println(candidate.chip);
+    return false;
+  }
+
+  Serial.print(F("Validated SD update for "));
+  Serial.print(candidate.hardware);
+  Serial.print(F("/"));
+  Serial.print(candidate.chip);
+  Serial.print(F(" version "));
+  Serial.println(candidate.version);
+  return true;
+}
+
+bool SDInterface::performUpdate(Stream &updateSource, size_t updateSize) {
   if (Update.begin(updateSize)) {   
     #ifdef HAS_SCREEN
       display_obj.tft.println(text_table2[5] + String(updateSize));
@@ -258,10 +546,12 @@ void SDInterface::performUpdate(Stream &updateSource, size_t updateSize) {
       Serial.print(F("/"));
       Serial.print(updateSize);
       Serial.println(F(". Retry?"));
+      Update.abort();
+      return false;
     }
     if (Update.end()) {
       if (Update.isFinished()) {
-
+        return true;
       }
       else {
         #ifdef HAS_SCREEN
@@ -272,6 +562,7 @@ void SDInterface::performUpdate(Stream &updateSource, size_t updateSize) {
         #ifdef HAS_SCREEN
           display_obj.tft.setTextColor(TFT_WHITE);
         #endif
+        return false;
       }
     }
     else {
@@ -280,6 +571,7 @@ void SDInterface::performUpdate(Stream &updateSource, size_t updateSize) {
       #endif
       Serial.print(F("Error Occurred. Error #: "));
       Serial.println(Update.getError());
+      return false;
     }
 
   }
@@ -289,5 +581,6 @@ void SDInterface::performUpdate(Stream &updateSource, size_t updateSize) {
       display_obj.tft.println(text_table2[14]);
     #endif
     Serial.println(F("Not enough space to begin OTA"));
+    return false;
   }
 }

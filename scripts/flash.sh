@@ -15,7 +15,9 @@ fi
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
 RELEASE_DIR="${PROJECT_DIR}/release"
-APP_IMAGE="${RELEASE_DIR}/Marauder_Eternal_1.14.4_MiniV3_ESP32-C5.app.bin"
+MANIFEST="${RELEASE_DIR}/manifest.json"
+APP_FILENAME="$(python3 -c 'import json,sys; print(next(image["file"] for image in json.load(open(sys.argv[1]))["images"] if image["offset"] == "0x10000"))' "${MANIFEST}")"
+APP_IMAGE="${RELEASE_DIR}/${APP_FILENAME}"
 
 if [[ -n "${ESPTOOL_BIN:-}" ]]; then
   ESPTOOL="${ESPTOOL_BIN}"
@@ -34,4 +36,4 @@ fi
 "${ESPTOOL}" --chip esp32c5 --port "${PORT}" chip-id
 "${ESPTOOL}" --chip esp32c5 --port "${PORT}" --baud 460800 \
   --before default-reset --after hard-reset \
-  write-flash 0x10000 "${APP_IMAGE}"
+  write-flash 0x10000 "${APP_IMAGE}" 0x400000 "${APP_IMAGE}"

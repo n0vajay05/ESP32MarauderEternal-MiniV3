@@ -2,45 +2,68 @@
 #include "PcapHeader.h"
 #include "lang_var.h"
 
-Buffer::Buffer(){
-  bufA = (uint8_t*)malloc(BUF_SIZE);
-  bufB = (uint8_t*)malloc(BUF_SIZE);
+Buffer::Buffer() {}
+
+Buffer::~Buffer() {
+  free(bufA);
+  free(bufB);
 }
 
-void Buffer::createFile(const char* name, bool is_pcap, bool is_gpx){
-  int i=0;
-  if (is_pcap) {
-    do{
-      fileName = "/"+String(name)+"_"+(String)i+".pcap";
-      i++;
-    } while(fs->exists(fileName));
+bool Buffer::ensureAllocated() {
+  if (bufA != nullptr && bufB != nullptr)
+    return true;
+
+  free(bufA);
+  free(bufB);
+  bufA = nullptr;
+  bufB = nullptr;
+
+  #ifdef HAS_PSRAM
+    bufA = static_cast<uint8_t*>(ps_malloc(BUF_SIZE));
+    bufB = static_cast<uint8_t*>(ps_malloc(BUF_SIZE));
+  #else
+    bufA = static_cast<uint8_t*>(malloc(BUF_SIZE));
+    bufB = static_cast<uint8_t*>(malloc(BUF_SIZE));
+  #endif
+
+  if (bufA == nullptr || bufB == nullptr) {
+    free(bufA);
+    free(bufB);
+    bufA = nullptr;
+    bufB = nullptr;
+    Serial.println(F("Capture buffers could not be allocated"));
+    return false;
   }
-  else if ((!is_pcap) && (!is_gpx)) {
-    do{
-      fileName = "/"+String(name)+"_"+(String)i+".log";
-      i++;
-    } while(fs->exists(fileName));
-  }
-  else {
-    do{
-      fileName = "/"+String(name)+"_"+(String)i+".gpx";
-      i++;
-    } while(fs->exists(fileName));
-  }
+  return true;
+}
+
+bool Buffer::createFile(const char* name, bool is_pcap, bool is_gpx) {
+  int index = 0;
+  const char* extension = is_pcap ? "pcap" : (is_gpx ? "gpx" : "log");
+  do {
+    fileName = "/" + String(name) + "_" + String(index++) + "." + extension;
+  } while (fs->exists(fileName));
 
   Serial.println(fileName);
-  
   file = fs->open(fileName, FILE_WRITE);
+  if (!file) {
+    Serial.println("Could not create capture file '" + fileName + "'");
+    return false;
+  }
   file.close();
+  return true;
 }
 
-void Buffer::open(bool is_pcap){
+void Buffer::open(bool is_pcap) {
+  portENTER_CRITICAL(&mux);
   bufSizeA = 0;
   bufSizeB = 0;
-
-  bufSizeB = 0;
-
+  useA = true;
+  savingA = false;
+  savingB = false;
+  droppedRecords = 0;
   writing = true;
+  portEXIT_CRITICAL(&mux);
 
   if (is_pcap) {
     uint8_t header[marauder::kPcapGlobalHeaderSize];
@@ -50,26 +73,33 @@ void Buffer::open(bool is_pcap){
 }
 
 String Buffer::getFileName() {
-  return this->fileName;
+  return fileName;
 }
 
-void Buffer::openFile(const char* file_name, fs::FS* fs, bool serial, bool is_pcap, bool is_gpx, bool force) {
-  bool save_pcap = settings_obj.loadSetting<bool>("SavePCAP");
+void Buffer::openFile(const char* file_name, fs::FS* destination_fs,
+                      bool serial_output, bool is_pcap, bool is_gpx,
+                      bool force) {
+  const bool save_pcap = settings_obj.loadSetting<bool>("SavePCAP");
   if (!save_pcap && !force) {
-    this->fs = NULL;
-    this->serial = false;
+    portENTER_CRITICAL(&mux);
     writing = false;
+    portEXIT_CRITICAL(&mux);
+    fs = nullptr;
+    serial = false;
     return;
   }
-  this->fs = fs;
-  this->serial = serial;
-  if (this->fs) {
-    createFile(file_name, is_pcap, is_gpx);
-  }
-  if (this->fs || this->serial) {
+
+  fs = destination_fs;
+  serial = serial_output;
+  if (fs != nullptr && !createFile(file_name, is_pcap, is_gpx))
+    fs = nullptr;
+
+  if ((fs != nullptr || serial) && ensureAllocated())
     open(is_pcap);
-  } else {
+  else {
+    portENTER_CRITICAL(&mux);
     writing = false;
+    portEXIT_CRITICAL(&mux);
   }
 }
 
@@ -77,7 +107,8 @@ void Buffer::pcapOpen(const char* file_name, fs::FS* fs, bool serial) {
   openFile(file_name, fs, serial, true);
 }
 
-void Buffer::logOpen(const char* file_name, fs::FS* fs, bool serial, bool force) {
+void Buffer::logOpen(const char* file_name, fs::FS* fs, bool serial,
+                     bool force) {
   openFile(file_name, fs, serial, false, false, force);
 }
 
@@ -85,169 +116,178 @@ void Buffer::gpxOpen(const char* file_name, fs::FS* fs, bool serial) {
   openFile(file_name, fs, serial, false, true);
 }
 
-void Buffer::add(const uint8_t* buf, uint32_t len, bool is_pcap){
-  // buffer is full -> drop packet
-  if((useA && bufSizeA + len >= BUF_SIZE && bufSizeB > 0) || (!useA && bufSizeB + len >= BUF_SIZE && bufSizeA > 0)){
-    //Serial.print(";"); 
-    return;
-  }
-  
-  if(useA && bufSizeA + len + 16 >= BUF_SIZE && bufSizeB == 0){
-    useA = false;
-    //Serial.println("\nswitched to buffer B");
-  }
-  else if(!useA && bufSizeB + len + 16 >= BUF_SIZE && bufSizeA == 0){
-    useA = true;
-    //Serial.println("\nswitched to buffer A");
+bool Buffer::add(const uint8_t* data, uint32_t len, bool is_pcap) {
+  if (data == nullptr || len == 0)
+    return false;
+
+  const uint32_t header_len = is_pcap ? 16 : 0;
+  const uint32_t record_len = header_len + len;
+  if (record_len > BUF_SIZE) {
+    portENTER_CRITICAL(&mux);
+    droppedRecords++;
+    portEXIT_CRITICAL(&mux);
+    return false;
   }
 
-  uint32_t microSeconds = micros(); // e.g. 45200400 => 45s 200ms 400us
-  uint32_t seconds = (microSeconds/1000)/1000; // e.g. 45200400/1000/1000 = 45200 / 1000 = 45s
-
-  microSeconds -= seconds*1000*1000; // e.g. 45200400 - 45*1000*1000 = 45200400 - 45000000 = 400us (because we only need the offset)
-  
+  uint8_t header[16];
   if (is_pcap) {
-    write(seconds); // ts_sec
-    write(microSeconds); // ts_usec
-    write(len); // incl_len
-    write(len); // orig_len
+    uint32_t microseconds = micros();
+    const uint32_t seconds = microseconds / 1000000;
+    microseconds -= seconds * 1000000;
+    const uint32_t values[4] = {seconds, microseconds, len, len};
+    for (size_t value = 0; value < 4; value++) {
+      header[value * 4] = values[value];
+      header[value * 4 + 1] = values[value] >> 8;
+      header[value * 4 + 2] = values[value] >> 16;
+      header[value * 4 + 3] = values[value] >> 24;
+    }
   }
-  
-  write(buf, len); // packet payload
+
+  portENTER_CRITICAL(&mux);
+  if (!writing || bufA == nullptr || bufB == nullptr) {
+    portEXIT_CRITICAL(&mux);
+    return false;
+  }
+
+  uint32_t* active_size = useA ? &bufSizeA : &bufSizeB;
+  const bool other_available = useA ? (!savingB && bufSizeB == 0) :
+                                      (!savingA && bufSizeA == 0);
+  if (*active_size + record_len > BUF_SIZE && other_available) {
+    useA = !useA;
+    active_size = useA ? &bufSizeA : &bufSizeB;
+  }
+
+  if (*active_size + record_len > BUF_SIZE || (useA ? savingA : savingB)) {
+    droppedRecords++;
+    portEXIT_CRITICAL(&mux);
+    return false;
+  }
+
+  uint8_t* destination = (useA ? bufA : bufB) + *active_size;
+  if (header_len > 0) {
+    memcpy(destination, header, header_len);
+    destination += header_len;
+  }
+  memcpy(destination, data, len);
+  *active_size += record_len;
+  portEXIT_CRITICAL(&mux);
+  return true;
 }
 
-void Buffer::append(wifi_promiscuous_pkt_t *packet, int len) {
-  bool save_packet = settings_obj.loadSetting<bool>(text_table4[7]);
-  if (save_packet) {
-    add(packet->payload, len, true);
-  }
+void Buffer::append(wifi_promiscuous_pkt_t* packet, int len) {
+  // openFile() applies the SavePCAP policy once. Avoid a settings lookup from
+  // every promiscuous callback, and allow explicitly forced diagnostic logs.
+  if (packet != nullptr && len > 0)
+    add(packet->payload, static_cast<uint32_t>(len), true);
 }
 
 void Buffer::append(String log) {
-  bool save_packet = settings_obj.loadSetting<bool>(text_table4[7]);
-  if (save_packet) {
-    add((const uint8_t*)log.c_str(), log.length(), false);
-  }
+  add(reinterpret_cast<const uint8_t*>(log.c_str()), log.length(), false);
 }
 
-void Buffer::write(int32_t n){
-  uint8_t buf[4];
-  buf[0] = n;
-  buf[1] = n >> 8;
-  buf[2] = n >> 16;
-  buf[3] = n >> 24;
-  write(buf,4);
+bool Buffer::write(const uint8_t* data, uint32_t len) {
+  return add(data, len, false);
 }
 
-void Buffer::write(uint32_t n){
-  uint8_t buf[4];
-  buf[0] = n;
-  buf[1] = n >> 8;
-  buf[2] = n >> 16;
-  buf[3] = n >> 24;
-  write(buf,4);
-}
-
-void Buffer::write(uint16_t n){
-  uint8_t buf[2];
-  buf[0] = n;
-  buf[1] = n >> 8;
-  write(buf,2);
-}
-
-void Buffer::write(const uint8_t* buf, uint32_t len){
-  if(!writing) return;
-  while(saving) delay(10);
-  
-  if(useA){
-    memcpy(&bufA[bufSizeA], buf, len);
-    bufSizeA += len;
-  }else{
-    memcpy(&bufB[bufSizeB], buf, len);
-    bufSizeB += len;
-  }
-}
-
-void Buffer::saveFs(){
+bool Buffer::saveFs(const uint8_t* data, uint32_t len) {
   file = fs->open(fileName, FILE_APPEND);
   if (!file) {
-    Serial.println(text02+fileName+"'");
-    return;
+    Serial.println(text02 + fileName + "'");
+    return false;
   }
-
-  if(useA){
-    if(bufSizeB > 0){
-      file.write(bufB, bufSizeB);
-    }
-    if(bufSizeA > 0){
-      file.write(bufA, bufSizeA);
-    }
-  } else {
-    if(bufSizeA > 0){
-      file.write(bufA, bufSizeA);
-    }
-    if(bufSizeB > 0){
-      file.write(bufB, bufSizeB);
-    }
-  }
-
+  const bool success = file.write(data, len) == len;
   file.close();
+  if (!success)
+    Serial.println(F("Capture write was incomplete; buffered data retained"));
+  return success;
 }
 
-void Buffer::saveSerial() {
-  // Saves to main console UART, user-facing app will ignore these markers
-  // Uses / and ] in markers as they are illegal characters for SSIDs
+bool Buffer::saveSerial(const uint8_t* data, uint32_t len) {
   const char* mark_begin = "[BUF/BEGIN]";
   const size_t mark_begin_len = strlen(mark_begin);
   const char* mark_close = "[BUF/CLOSE]";
   const size_t mark_close_len = strlen(mark_close);
+  const size_t total = mark_begin_len + len + mark_close_len;
 
-  // Additional buffer and memcpy's so that a single Serial.write() is called
-  // This is necessary so that other console output isn't mixed into buffer stream
-  uint8_t* buf = (uint8_t*)malloc(mark_begin_len + bufSizeA + bufSizeB + mark_close_len);
-  uint8_t* it = buf;
-  memcpy(it, mark_begin, mark_begin_len);
-  it += mark_begin_len;
-
-  if(useA){
-    if(bufSizeB > 0){
-      memcpy(it, bufB, bufSizeB);
-      it += bufSizeB;
-    }
-    if(bufSizeA > 0){
-      memcpy(it, bufA, bufSizeA);
-      it += bufSizeA;
-    }
-  } else {
-    if(bufSizeA > 0){
-      memcpy(it, bufA, bufSizeA);
-      it += bufSizeA;
-    }
-    if(bufSizeB > 0){
-      memcpy(it, bufB, bufSizeB);
-      it += bufSizeB;
-    }
+  uint8_t* output = static_cast<uint8_t*>(malloc(total));
+  if (output == nullptr) {
+    Serial.println(F("Could not allocate serial capture buffer"));
+    return false;
   }
 
-  memcpy(it, mark_close, mark_close_len);
-  it += mark_close_len;
-  Serial.write(buf, it - buf);
-  free(buf);
+  uint8_t* cursor = output;
+  memcpy(cursor, mark_begin, mark_begin_len);
+  cursor += mark_begin_len;
+  memcpy(cursor, data, len);
+  cursor += len;
+  memcpy(cursor, mark_close, mark_close_len);
+
+  const bool success = Serial.write(output, total) == total;
+  free(output);
+  return success;
 }
 
 void Buffer::save() {
-  saving = true;
+  uint8_t* data = nullptr;
+  uint32_t length = 0;
+  bool selectedA = false;
 
-  if((bufSizeA + bufSizeB) == 0){
-    saving = false;
+  portENTER_CRITICAL(&mux);
+  if (bufA == nullptr || bufB == nullptr) {
+    portEXIT_CRITICAL(&mux);
     return;
   }
 
-  if(this->fs) saveFs();
-  if(this->serial) saveSerial();
+  // Flush the inactive buffer first; it contains the oldest complete records.
+  if (useA && bufSizeB > 0 && !savingB) {
+    selectedA = false;
+  } else if (!useA && bufSizeA > 0 && !savingA) {
+    selectedA = true;
+  } else if (useA && bufSizeA > 0 && !savingA &&
+             bufSizeB == 0 && !savingB) {
+    useA = false;
+    selectedA = true;
+  } else if (!useA && bufSizeB > 0 && !savingB &&
+             bufSizeA == 0 && !savingA) {
+    useA = true;
+    selectedA = false;
+  } else {
+    portEXIT_CRITICAL(&mux);
+    return;
+  }
 
-  bufSizeA = 0;
-  bufSizeB = 0;
+  if (selectedA) {
+    savingA = true;
+    data = bufA;
+    length = bufSizeA;
+  } else {
+    savingB = true;
+    data = bufB;
+    length = bufSizeB;
+  }
+  portEXIT_CRITICAL(&mux);
 
-  saving = false;
+  bool success = true;
+  if (fs != nullptr)
+    success = saveFs(data, length) && success;
+  if (serial)
+    success = saveSerial(data, length) && success;
+
+  portENTER_CRITICAL(&mux);
+  if (selectedA) {
+    if (success)
+      bufSizeA = 0;
+    savingA = false;
+  } else {
+    if (success)
+      bufSizeB = 0;
+    savingB = false;
+  }
+  const uint32_t dropped = droppedRecords;
+  droppedRecords = 0;
+  portEXIT_CRITICAL(&mux);
+
+  if (dropped > 0)
+    Serial.printf("Capture buffer dropped %lu record(s)\n",
+                  static_cast<unsigned long>(dropped));
 }
