@@ -10,7 +10,11 @@ g++ -std=c++17 -Wall -Wextra -Werror \
   -I"${PROJECT_DIR}/firmware/MarauderEternal" \
   "${PROJECT_DIR}/tests/native/test_helpers.cpp" \
   "${PROJECT_DIR}/firmware/MarauderEternal/BeaconFrame.cpp" \
+  "${PROJECT_DIR}/firmware/MarauderEternal/DeauthFrame.cpp" \
   "${PROJECT_DIR}/firmware/MarauderEternal/DisplayLine.cpp" \
+  "${PROJECT_DIR}/firmware/MarauderEternal/RsnCapabilities.cpp" \
+  "${PROJECT_DIR}/firmware/MarauderEternal/SdTransferPath.cpp" \
+  "${PROJECT_DIR}/firmware/MarauderEternal/UtcTime.cpp" \
   "${PROJECT_DIR}/firmware/MarauderEternal/WdgResponse.cpp" \
   -o "${TEST_DIR}/test_helpers"
 

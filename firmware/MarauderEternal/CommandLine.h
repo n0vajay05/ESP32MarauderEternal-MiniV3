@@ -58,6 +58,10 @@ const char PROGMEM PROTOCOL_INFO_CMD[] = "protocolinfo";
 const char PROGMEM BACKUP_SPIFFS_CMD[] = "backupspiffs";
 const char PROGMEM BACKUP_STATUS_CMD[] = "backupstatus";
 const char PROGMEM RESTORE_SPIFFS_CMD[] = "restorespiffs";
+const char PROGMEM SD_LIST_CMD[] = "sdlist";
+const char PROGMEM SD_GET_CMD[] = "sdget";
+const char PROGMEM SD_PUT_CMD[] = "sdput";
+const char PROGMEM SD_SESSION_CMD[] = "sdsession";
 const char PROGMEM LED_CMD[] = "led";
 const char PROGMEM GPS_DATA_CMD[] = "gpsdata";
 const char PROGMEM GPS_CMD[] = "gps";
@@ -141,6 +145,10 @@ const char PROGMEM HELP_PROTOCOL_INFO_CMD[] = "protocolinfo [--machine <transact
 const char PROGMEM HELP_BACKUP_SPIFFS_CMD[] = "backupspiffs [--machine <transaction-id>] - copy SPIFFS to /spiffs on SD";
 const char PROGMEM HELP_BACKUP_STATUS_CMD[] = "backupstatus [--machine <transaction-id>] - inspect /spiffs on SD";
 const char PROGMEM HELP_RESTORE_SPIFFS_CMD[] = "restorespiffs [--machine <transaction-id>] - restore SPIFFS from /spiffs on SD";
+const char PROGMEM HELP_SD_LIST_CMD[] = "sdlist --machine <transaction-id> - recursively list SD files";
+const char PROGMEM HELP_SD_GET_CMD[] = "sdget --machine <transaction-id> --path-hex <hex> - download an SD file";
+const char PROGMEM HELP_SD_PUT_CMD[] = "sdput --machine <transaction-id> --path-hex <hex> --bytes <size> --sha256 <digest> [--overwrite] - upload Evil Portal HTML";
+const char PROGMEM HELP_SD_SESSION_CMD[] = "sdsession --machine <transaction-id> --state <begin/end> - lock/unlock USB SD mode";
 const char PROGMEM HELP_LED_CMD[] = "led -s <hex color>/-p <rainbow>";
 const char PROGMEM HELP_GPS_DATA_CMD[] = "gpsdata";
 const char PROGMEM HELP_GPS_CMD[] = "gps [-t] [-g] <fix/sat/lon/lat/alt/date/accuracy/text/nmea>\r\n    [-n] <native/all/gps/glonass/galileo/navic/qzss/beidou>\r\n         [-b = use BD vs GB for beidou]";
@@ -234,6 +242,10 @@ class CommandLine {
     void showCounts(int selected, int unselected = -1);
     int argSearch(LinkedList<String>* cmd_args, const char* key);
     void startScanFromCLI(int scan_mode, uint16_t color, const char* scan_name);
+    void showSdSessionStatus(const char* status, const String& detail = "",
+                             int progress = -1);
+    void exitSdSession();
+    bool sd_session_active = false;
 
     const char* ascii_art =
     "\r\n"
@@ -266,6 +278,7 @@ class CommandLine {
 
     void RunSetup();
     void main(uint32_t currentTime);
+    bool sdSessionActive() const;
 };
 
 #endif

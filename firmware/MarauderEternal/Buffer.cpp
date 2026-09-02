@@ -37,11 +37,26 @@ bool Buffer::ensureAllocated() {
   return true;
 }
 
-bool Buffer::createFile(const char* name, bool is_pcap, bool is_gpx) {
+bool Buffer::createFile(const char* name, const char* directory, bool is_pcap,
+                        bool is_gpx) {
+  String target_directory = directory != nullptr ? String(directory) : "/";
+  if (!target_directory.startsWith("/"))
+    target_directory = "/" + target_directory;
+  while (target_directory.length() > 1 && target_directory.endsWith("/"))
+    target_directory.remove(target_directory.length() - 1);
+
+  if (target_directory != "/" && !fs->exists(target_directory) &&
+      !fs->mkdir(target_directory)) {
+    Serial.println("Could not create capture directory '" +
+                   target_directory + "'");
+    return false;
+  }
+
   int index = 0;
   const char* extension = is_pcap ? "pcap" : (is_gpx ? "gpx" : "log");
   do {
-    fileName = "/" + String(name) + "_" + String(index++) + "." + extension;
+    fileName = (target_directory == "/" ? "/" : target_directory + "/") +
+               String(name) + "_" + String(index++) + "." + extension;
   } while (fs->exists(fileName));
 
   Serial.println(fileName);
@@ -78,7 +93,10 @@ String Buffer::getFileName() {
 
 void Buffer::openFile(const char* file_name, fs::FS* destination_fs,
                       bool serial_output, bool is_pcap, bool is_gpx,
-                      bool force) {
+                      bool force, const char* directory) {
+  // Finish the previous capture before changing its destination or policy.
+  flush();
+
   const bool save_pcap = settings_obj.loadSetting<bool>("SavePCAP");
   if (!save_pcap && !force) {
     portENTER_CRITICAL(&mux);
@@ -91,7 +109,7 @@ void Buffer::openFile(const char* file_name, fs::FS* destination_fs,
 
   fs = destination_fs;
   serial = serial_output;
-  if (fs != nullptr && !createFile(file_name, is_pcap, is_gpx))
+  if (fs != nullptr && !createFile(file_name, directory, is_pcap, is_gpx))
     fs = nullptr;
 
   if ((fs != nullptr || serial) && ensureAllocated())
@@ -103,17 +121,19 @@ void Buffer::openFile(const char* file_name, fs::FS* destination_fs,
   }
 }
 
-void Buffer::pcapOpen(const char* file_name, fs::FS* fs, bool serial) {
-  openFile(file_name, fs, serial, true);
+void Buffer::pcapOpen(const char* file_name, fs::FS* fs, bool serial,
+                      const char* directory) {
+  openFile(file_name, fs, serial, true, false, false, directory);
 }
 
 void Buffer::logOpen(const char* file_name, fs::FS* fs, bool serial,
-                     bool force) {
-  openFile(file_name, fs, serial, false, false, force);
+                     bool force, const char* directory) {
+  openFile(file_name, fs, serial, false, false, force, directory);
 }
 
-void Buffer::gpxOpen(const char* file_name, fs::FS* fs, bool serial) {
-  openFile(file_name, fs, serial, false, true);
+void Buffer::gpxOpen(const char* file_name, fs::FS* fs, bool serial,
+                     const char* directory) {
+  openFile(file_name, fs, serial, false, true, false, directory);
 }
 
 bool Buffer::add(const uint8_t* data, uint32_t len, bool is_pcap) {
@@ -207,24 +227,17 @@ bool Buffer::saveSerial(const uint8_t* data, uint32_t len) {
   const size_t mark_begin_len = strlen(mark_begin);
   const char* mark_close = "[BUF/CLOSE]";
   const size_t mark_close_len = strlen(mark_close);
-  const size_t total = mark_begin_len + len + mark_close_len;
 
-  uint8_t* output = static_cast<uint8_t*>(malloc(total));
-  if (output == nullptr) {
-    Serial.println(F("Could not allocate serial capture buffer"));
+  // Stream each segment directly. Allocating a second buffer as large as the
+  // capture buffer can fail after memory-intensive WiFi/BLE workflows even
+  // though the buffered capture itself is still valid.
+  if (Serial.write(reinterpret_cast<const uint8_t*>(mark_begin),
+                   mark_begin_len) != mark_begin_len)
     return false;
-  }
-
-  uint8_t* cursor = output;
-  memcpy(cursor, mark_begin, mark_begin_len);
-  cursor += mark_begin_len;
-  memcpy(cursor, data, len);
-  cursor += len;
-  memcpy(cursor, mark_close, mark_close_len);
-
-  const bool success = Serial.write(output, total) == total;
-  free(output);
-  return success;
+  if (Serial.write(data, len) != len)
+    return false;
+  return Serial.write(reinterpret_cast<const uint8_t*>(mark_close),
+                      mark_close_len) == mark_close_len;
 }
 
 void Buffer::save() {
@@ -290,4 +303,11 @@ void Buffer::save() {
   if (dropped > 0)
     Serial.printf("Capture buffer dropped %lu record(s)\n",
                   static_cast<unsigned long>(dropped));
+}
+
+void Buffer::flush() {
+  // There are only two buffers. Once producers have stopped, two saves drain
+  // both the inactive buffer and the final active partial buffer.
+  save();
+  save();
 }

@@ -34,6 +34,45 @@ namespace {
     return base == "/" ? "/" + child : base + "/" + child;
   }
 
+  void appendDirectoryFiles(LinkedList<String>* file_names,
+                            const String& directory, const String& extension,
+                            bool recursive, uint8_t depth = 0) {
+    if (file_names == nullptr || depth > 8)
+      return;
+
+    File dir = SD.open(directory);
+    if (!dir || !dir.isDirectory()) {
+      if (dir)
+        dir.close();
+      return;
+    }
+
+    File entry = dir.openNextFile();
+    while (entry) {
+      String entry_path = entry.path();
+      const String entry_name = marauder::storage::baseName(entry.name());
+      const String expected_prefix =
+          directory == "/" ? "/" : directory + "/";
+      if (entry_path.length() == 0 ||
+          !entry_path.startsWith(expected_prefix))
+        entry_path = joinPath(directory, entry_name);
+      const bool is_directory = entry.isDirectory();
+      entry.close();
+
+      if (is_directory) {
+        if (recursive)
+          appendDirectoryFiles(file_names, entry_path, extension, true,
+                               depth + 1);
+      }
+      else if (extension.length() == 0 || entry_path.endsWith(extension)) {
+        file_names->add(marauder::storage::relativePath(entry_path));
+      }
+
+      entry = dir.openNextFile();
+    }
+    dir.close();
+  }
+
   bool copyTree(
     fs::FS& source,
     const String& source_path,
@@ -122,8 +161,6 @@ namespace {
 
 bool SDInterface::initSD() {
   #ifdef HAS_SD
-    String display_string = "";
-
     #ifdef KIT
       pinMode(SD_DET, INPUT);
       if (digitalRead(SD_DET) != LOW) {
@@ -174,32 +211,48 @@ bool SDInterface::initSD() {
       this->cardType = SD.cardType();
 
       this->cardSizeMB = SD.cardSize() / (1024 * 1024);
-    
-      if (this->supported) {
-        const int NUM_DIGITS = log10(this->cardSizeMB) + 1;
+      this->card_sz = String(this->cardSizeMB);
 
-        char sz[NUM_DIGITS + 1];
+      this->ensureStorageLayout();
 
-        sz[NUM_DIGITS] =  0;
-        for ( size_t i = NUM_DIGITS; i--; this->cardSizeMB /= 10)
-        {
-            sz[i] = '0' + (this->cardSizeMB % 10);
-            display_string.concat((String)sz[i]);
-        }
-  
-        this->card_sz = sz;
-      }
-
-      if (!SD.exists("/SCRIPTS")) {
-
-        SD.mkdir("/SCRIPTS");
-      }
-
-      this->sd_files = new LinkedList<String>();
+      if (this->sd_files == nullptr)
+        this->sd_files = new LinkedList<String>();
     
       return true;
   }
 
+  #else
+    return false;
+  #endif
+}
+
+bool SDInterface::ensureStorageLayout() {
+  #ifdef HAS_SD
+    if (!this->supported)
+      return false;
+
+    const char* directories[] = {
+      marauder::storage::CAPTURES_DIR,
+      marauder::storage::LOGS_DIR,
+      marauder::storage::GPS_DIR,
+      marauder::storage::WARDRIVE_DIR,
+      marauder::storage::LISTS_DIR,
+      marauder::storage::EVIL_PORTAL_DIR,
+      marauder::storage::EVIL_PORTAL_HTML_DIR,
+      marauder::storage::CONFIG_DIR,
+      marauder::storage::FIRMWARE_DIR,
+      marauder::storage::SCRIPTS_DIR,
+    };
+
+    bool complete = true;
+    for (const char* directory : directories) {
+      if (!SD.exists(directory) && !SD.mkdir(directory)) {
+        Serial.println(String(F("Could not create SD directory ")) +
+                       directory);
+        complete = false;
+      }
+    }
+    return complete;
   #else
     return false;
   #endif
@@ -316,30 +369,11 @@ bool SDInterface::migrateSPIFFS(uint8_t operation, size_t& files_copied,
   return true;
 }
 
-void SDInterface::listDirToLinkedList(LinkedList<String>* file_names, String str_dir, String ext) {
-  if (this->supported) {
-    File dir = SD.open(str_dir);
-    while (true)
-    {
-      File entry = dir.openNextFile();
-      if (!entry)
-      {
-        break;
-      }
-
-      if (entry.isDirectory())
-        continue;
-
-      String file_name = entry.name();
-      if (ext != "") {
-        if (file_name.endsWith(ext)) {
-          file_names->add(file_name);
-        }
-      }
-      else
-        file_names->add(file_name);
-    }
-  }
+void SDInterface::listDirToLinkedList(LinkedList<String>* file_names,
+                                      String str_dir, String ext,
+                                      bool recursive) {
+  if (this->supported)
+    appendDirectoryFiles(file_names, str_dir, ext, recursive);
 }
 
 void SDInterface::listDir(String str_dir){
@@ -365,8 +399,11 @@ void SDInterface::listDir(String str_dir){
 }
 
 void SDInterface::runUpdate(String file_name) {
-  if (file_name == "")
-    file_name = "/update.bin";
+  if (file_name == "") {
+    file_name = marauder::storage::DEFAULT_UPDATE;
+    if (!SD.exists(file_name) && SD.exists("/update.bin"))
+      file_name = "/update.bin";
+  }
 
   #ifdef HAS_SCREEN
     display_obj.tft.setTextWrap(false);
@@ -440,7 +477,7 @@ void SDInterface::runUpdate(String file_name) {
       display_obj.tft.setTextColor(TFT_RED);
       display_obj.tft.println(F(text_table2[4]));
     #endif
-    Serial.println(F("Could not load update.bin from sd root"));
+    Serial.println("Could not load firmware image " + file_name);
     #ifdef HAS_SCREEN
       display_obj.tft.setTextColor(TFT_WHITE);
     #endif

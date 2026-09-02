@@ -2,6 +2,10 @@
 
 #include <errno.h>
 #include <limits.h>
+#ifdef HAS_SD
+  #include "SdTransferPath.h"
+  #include "mbedtls/sha256.h"
+#endif
 
 namespace {
   bool validTransactionId(const String& transaction_id) {
@@ -43,6 +47,154 @@ namespace {
       return "BACKUP_NOT_FOUND";
     return fallback;
   }
+
+  #ifdef HAS_SD
+  constexpr uint8_t SD_LIST_MAX_DEPTH = 8;
+
+  String joinedSdPath(const String& directory, const String& name) {
+    const String base_name = marauder::storage::baseName(name);
+    return directory == "/" ? "/" + base_name
+                              : directory + "/" + base_name;
+  }
+
+  String normalizedSdEntryPath(const String& directory, File& entry) {
+    String path = entry.path();
+    const String expected_prefix = directory == "/" ? "/" : directory + "/";
+    if (path.length() == 0 || !path.startsWith(expected_prefix))
+      path = joinedSdPath(directory, entry.name());
+    return path;
+  }
+
+  void printHexString(const String& value) {
+    static constexpr char hex[] = "0123456789abcdef";
+    for (size_t index = 0; index < value.length(); ++index) {
+      const uint8_t byte = static_cast<uint8_t>(value.charAt(index));
+      Serial.write(hex[byte >> 4]);
+      Serial.write(hex[byte & 0x0f]);
+    }
+  }
+
+  void machineSdSummary(const String& transaction_id, const char* command,
+                        const char* status, const char* code,
+                        uint64_t files = 0, uint64_t bytes = 0) {
+    Serial.printf(
+        "@MARAUDER:{\"protocol\":1,\"tx\":\"%s\",\"command\":\"%s\","
+        "\"status\":\"%s\",\"code\":\"%s\",\"files\":%llu,"
+        "\"bytes\":%llu}\n",
+        transaction_id.c_str(), command, status, code,
+        static_cast<unsigned long long>(files),
+        static_cast<unsigned long long>(bytes));
+  }
+
+  void machineSdFile(const String& transaction_id, const String& path,
+                     uint64_t bytes, uint64_t modified) {
+    Serial.printf(
+        "@MARAUDER:{\"protocol\":1,\"tx\":\"%s\",\"command\":\"sdlist\","
+        "\"status\":\"file\",\"code\":\"OK\",\"pathHex\":\"",
+        transaction_id.c_str());
+    printHexString(path);
+    Serial.printf("\",\"bytes\":%llu,\"modified\":%llu}\n",
+                  static_cast<unsigned long long>(bytes),
+                  static_cast<unsigned long long>(modified));
+  }
+
+  bool streamSdDirectory(const String& transaction_id,
+                         const String& directory, uint8_t depth,
+                         uint64_t& files, uint64_t& bytes) {
+    if (depth > SD_LIST_MAX_DEPTH)
+      return false;
+
+    File dir = SD.open(directory, FILE_READ);
+    if (!dir || !dir.isDirectory()) {
+      if (dir)
+        dir.close();
+      return false;
+    }
+
+    File entry = dir.openNextFile();
+    while (entry) {
+      const String path = normalizedSdEntryPath(directory, entry);
+      const bool is_directory = entry.isDirectory();
+      const uint64_t file_size = is_directory ? 0 : entry.size();
+      const time_t last_write = entry.getLastWrite();
+      const uint64_t modified = last_write > 0
+                                    ? static_cast<uint64_t>(last_write) : 0;
+      entry.close();
+
+      if (is_directory) {
+        if (!streamSdDirectory(transaction_id, path, depth + 1, files,
+                               bytes)) {
+          dir.close();
+          return false;
+        }
+      }
+      else {
+        machineSdFile(transaction_id, path, file_size, modified);
+        ++files;
+        bytes += file_size;
+      }
+      entry = dir.openNextFile();
+    }
+    dir.close();
+    return true;
+  }
+
+  void machineSdGetStarted(const String& transaction_id,
+                           const String& path, uint64_t bytes) {
+    Serial.printf(
+        "@MARAUDER:{\"protocol\":1,\"tx\":\"%s\",\"command\":\"sdget\","
+        "\"status\":\"started\",\"code\":\"OK\",\"pathHex\":\"",
+        transaction_id.c_str());
+    printHexString(path);
+    Serial.printf("\",\"bytes\":%llu}\n",
+                  static_cast<unsigned long long>(bytes));
+    Serial.flush();
+  }
+
+  void machineSdGetFinished(const String& transaction_id,
+                            const char* status, const char* code,
+                            uint64_t bytes, const char* sha256 = nullptr) {
+    Serial.printf(
+        "@MARAUDER:{\"protocol\":1,\"tx\":\"%s\",\"command\":\"sdget\","
+        "\"status\":\"%s\",\"code\":\"%s\",\"bytes\":%llu",
+        transaction_id.c_str(), status, code,
+        static_cast<unsigned long long>(bytes));
+    if (sha256 != nullptr)
+      Serial.printf(",\"sha256\":\"%s\"", sha256);
+    Serial.println("}");
+  }
+
+  void machineSdPutResult(const String& transaction_id,
+                          const char* status, const char* code,
+                          const String* path, uint64_t bytes,
+                          const char* sha256 = nullptr) {
+    Serial.printf(
+        "@MARAUDER:{\"protocol\":1,\"tx\":\"%s\",\"command\":\"sdput\","
+        "\"status\":\"%s\",\"code\":\"%s\",\"bytes\":%llu",
+        transaction_id.c_str(), status, code,
+        static_cast<unsigned long long>(bytes));
+    if (path != nullptr) {
+      Serial.print(F(",\"pathHex\":\""));
+      printHexString(*path);
+      Serial.print('"');
+    }
+    if (sha256 != nullptr)
+      Serial.printf(",\"sha256\":\"%s\"", sha256);
+    Serial.println("}");
+    Serial.flush();
+  }
+
+  void writeTransferPadding(uint64_t bytes) {
+    uint8_t padding[128] = {};
+    while (bytes > 0) {
+      const size_t count = bytes > sizeof(padding) ? sizeof(padding)
+                                                   : static_cast<size_t>(bytes);
+      Serial.write(padding, count);
+      bytes -= count;
+      delay(0);
+    }
+  }
+  #endif
 }
 
 // Brightness functions defined in esp32_marauder.ino
@@ -64,6 +216,69 @@ void CommandLine::RunSetup() {
   Serial.print("> ");
 }
 
+bool CommandLine::sdSessionActive() const {
+  return this->sd_session_active;
+}
+
+void CommandLine::showSdSessionStatus(const char* status,
+                                      const String& detail, int progress) {
+  #ifdef HAS_SCREEN
+    display_obj.tft.fillScreen(TFT_BLACK);
+    display_obj.tft.setFreeFont(NULL);
+    display_obj.tft.setTextSize(1);
+    display_obj.tft.setTextWrap(false);
+    display_obj.tft.setTextColor(0x733F, TFT_BLACK);
+    display_obj.tft.drawCentreString("USB SD FILES", TFT_WIDTH / 2, 6, 1);
+    display_obj.tft.drawFastHLine(8, 20, TFT_WIDTH - 16, 0x31A6);
+
+    display_obj.tft.setTextColor(TFT_WHITE, TFT_BLACK);
+    display_obj.tft.drawCentreString(status, TFT_WIDTH / 2, 30, 2);
+
+    String visible_detail = detail;
+    if (visible_detail.length() > 20)
+      visible_detail = "..." + visible_detail.substring(visible_detail.length() - 17);
+    if (visible_detail.length() > 0) {
+      display_obj.tft.setTextColor(TFT_LIGHTGREY, TFT_BLACK);
+      display_obj.tft.drawCentreString(visible_detail, TFT_WIDTH / 2, 52, 1);
+    }
+
+    if (progress >= 0) {
+      progress = constrain(progress, 0, 100);
+      const int16_t bar_x = 12;
+      const int16_t bar_y = 69;
+      const int16_t bar_width = TFT_WIDTH - 24;
+      display_obj.tft.drawRect(bar_x, bar_y, bar_width, 12, 0x31A6);
+      display_obj.tft.fillRect(bar_x + 2, bar_y + 2,
+                               (bar_width - 4) * progress / 100, 8,
+                               TFT_CYAN);
+      display_obj.tft.setTextColor(TFT_WHITE, TFT_BLACK);
+      display_obj.tft.drawCentreString(String(progress) + "%",
+                                       TFT_WIDTH / 2, 85, 1);
+    }
+
+    display_obj.tft.setTextColor(TFT_ORANGE, TFT_BLACK);
+    display_obj.tft.drawCentreString("CONTROLS LOCKED",
+                                     TFT_WIDTH / 2, 103, 1);
+    #ifdef MARAUDER_MINI_V3
+      display_obj.tft.setTextColor(TFT_GREEN, TFT_BLACK);
+      display_obj.tft.drawCentreString("HOLD CENTER: EXIT",
+                                       TFT_WIDTH / 2, 116, 1);
+    #endif
+  #else
+    (void)status;
+    (void)detail;
+    (void)progress;
+  #endif
+}
+
+void CommandLine::exitSdSession() {
+  this->sd_session_active = false;
+  #ifdef HAS_SCREEN
+    display_obj.clearScreen();
+    menu_function_obj.changeMenu(menu_function_obj.current_menu, true);
+  #endif
+}
+
 String CommandLine::getSerialInput() {
   String input = "";
 
@@ -75,9 +290,28 @@ String CommandLine::getSerialInput() {
 }
 
 void CommandLine::main(uint32_t currentTime) {
+  #if defined(MARAUDER_MINI_V3) && defined(HAS_BUTTONS)
+    if (this->sd_session_active)
+      c_btn.justPressed();
+    if (this->sd_session_active && c_btn.isHeld()) {
+      while (digitalRead(c_btn.getPin()) ==
+             (c_btn.getPullup() ? LOW : HIGH))
+        delay(10);
+      this->exitSdSession();
+      Serial.println(F("USB SD mode closed from device controls"));
+    }
+  #endif
+
   String input = this->getSerialInput();
 
+  const bool sd_operation = input.startsWith("sdlist ") ||
+                            input.startsWith("sdget ") ||
+                            input.startsWith("sdput ");
+
   this->runCommand(input);
+
+  if (this->sd_session_active && sd_operation)
+    this->showSdSessionStatus("CONNECTED", "Waiting for PC");
 
   if (input != "")
     Serial.print("> ");
@@ -298,13 +532,24 @@ void CommandLine::startScanFromCLI(int scan_mode, uint16_t color, const char* sc
 void CommandLine::runCommand(String input) {
   if (input == "") return;
 
+  const bool storage_protocol_command =
+      input.startsWith("protocolinfo ") || input.startsWith("sdlist ") ||
+      input.startsWith("sdget ") || input.startsWith("sdput ") ||
+      input.startsWith("sdsession ");
   if(wifi_scan_obj.scanning() && wifi_scan_obj.currentScanMode == WIFI_SCAN_GPS_NMEA){
-    if(input != STOPSCAN_CMD) return;    
+    if(input != STOPSCAN_CMD && !storage_protocol_command) return;
   }
-  else
-    Serial.println("#" + input);
+  Serial.println("#" + input);
 
   LinkedList<String> cmd_args = this->parseCommand(input, " ");
+
+  if (this->sd_session_active &&
+      cmd_args.get(0) != PROTOCOL_INFO_CMD &&
+      cmd_args.get(0) != SD_LIST_CMD && cmd_args.get(0) != SD_GET_CMD &&
+      cmd_args.get(0) != SD_PUT_CMD && cmd_args.get(0) != SD_SESSION_CMD) {
+    Serial.println(F("USB SD mode is active; close it before using other commands"));
+    return;
+  }
   
   //// Admin commands
   // Help
@@ -320,6 +565,10 @@ void CommandLine::runCommand(String input) {
     Serial.println(HELP_BACKUP_SPIFFS_CMD);
     Serial.println(HELP_BACKUP_STATUS_CMD);
     Serial.println(HELP_RESTORE_SPIFFS_CMD);
+    Serial.println(HELP_SD_LIST_CMD);
+    Serial.println(HELP_SD_GET_CMD);
+    Serial.println(HELP_SD_PUT_CMD);
+    Serial.println(HELP_SD_SESSION_CMD);
     Serial.println(HELP_LED_CMD);
     Serial.println(HELP_GPS_DATA_CMD);
     Serial.println(HELP_GPS_CMD);
@@ -611,7 +860,9 @@ void CommandLine::runCommand(String input) {
           "@MARAUDER:{\"protocol\":1,\"tx\":\"%s\",\"command\":\"protocolinfo\","
           "\"status\":\"success\",\"code\":\"OK\",\"firmware\":\"%s\","
           "\"capabilities\":[\"spiffs-backup\",\"spiffs-backup-status\","
-          "\"spiffs-restore\"],\"backupPath\":\"/spiffs\"}\n",
+          "\"spiffs-restore\",\"sd-list\",\"sd-download\",\"sd-upload\","
+          "\"sd-session\"],"
+          "\"backupPath\":\"/spiffs\"}\n",
           transaction_id.c_str(), version_number.c_str()
         );
       #else
@@ -630,6 +881,463 @@ void CommandLine::runCommand(String input) {
         Serial.println(F("SPIFFS migration unavailable: SD not supported"));
       #endif
     }
+  }
+
+  else if (cmd_args.get(0) == SD_SESSION_CMD) {
+    const int machine_arg = this->argSearch(&cmd_args, "--machine");
+    const String transaction_id =
+        machine_arg >= 0 && machine_arg + 1 < cmd_args.size()
+            ? cmd_args.get(machine_arg + 1) : "";
+    const int state_arg = this->argSearch(&cmd_args, "--state");
+    const String state =
+        state_arg >= 0 && state_arg + 1 < cmd_args.size()
+            ? cmd_args.get(state_arg + 1) : "";
+    if (machine_arg < 0 || !validTransactionId(transaction_id)) {
+      machineResult(transaction_id, SD_SESSION_CMD, "error",
+                    "INVALID_TRANSACTION");
+      return;
+    }
+    if (state != "begin" && state != "end") {
+      machineResult(transaction_id, SD_SESSION_CMD, "error",
+                    "INVALID_STATE");
+      return;
+    }
+
+    #ifdef HAS_SD
+      if (state == "begin") {
+        if (!sd_obj.supported) {
+          machineResult(transaction_id, SD_SESSION_CMD, "error",
+                        "SD_NOT_READY");
+          return;
+        }
+        if (wifi_scan_obj.scanning()) {
+          machineResult(transaction_id, SD_SESSION_CMD, "error",
+                        "DEVICE_BUSY");
+          return;
+        }
+        this->sd_session_active = true;
+        this->showSdSessionStatus("CONNECTED", "Waiting for PC");
+        machineResult(transaction_id, SD_SESSION_CMD, "success", "OK");
+      }
+      else {
+        machineResult(transaction_id, SD_SESSION_CMD, "success", "OK");
+        this->exitSdSession();
+      }
+    #else
+      machineResult(transaction_id, SD_SESSION_CMD, "error",
+                    "SD_NOT_SUPPORTED");
+    #endif
+  }
+
+  else if (cmd_args.get(0) == SD_LIST_CMD) {
+    const int machine_arg = this->argSearch(&cmd_args, "--machine");
+    const String transaction_id =
+        machine_arg >= 0 && machine_arg + 1 < cmd_args.size()
+            ? cmd_args.get(machine_arg + 1) : "";
+    if (machine_arg < 0) {
+      Serial.println(F("SD file listing requires --machine <transaction-id>"));
+      return;
+    }
+    if (!validTransactionId(transaction_id)) {
+      machineResult(transaction_id, SD_LIST_CMD, "error",
+                    "INVALID_TRANSACTION");
+      return;
+    }
+
+    #ifdef HAS_SD
+      if (!sd_obj.supported) {
+        machineSdSummary(transaction_id, SD_LIST_CMD, "error",
+                         "SD_NOT_READY");
+        return;
+      }
+      if (wifi_scan_obj.scanning()) {
+        machineSdSummary(transaction_id, SD_LIST_CMD, "error",
+                         "DEVICE_BUSY");
+        return;
+      }
+
+      this->showSdSessionStatus("LISTING FILES", "Reading SD card");
+      machineSdSummary(transaction_id, SD_LIST_CMD, "started", "OK");
+      uint64_t files = 0;
+      uint64_t bytes = 0;
+      if (streamSdDirectory(transaction_id, "/", 0, files, bytes))
+        machineSdSummary(transaction_id, SD_LIST_CMD, "success", "OK",
+                         files, bytes);
+      else
+        machineSdSummary(transaction_id, SD_LIST_CMD, "error",
+                         "LIST_FAILED", files, bytes);
+    #else
+      machineResult(transaction_id, SD_LIST_CMD, "error",
+                    "SD_NOT_SUPPORTED");
+    #endif
+  }
+
+  else if (cmd_args.get(0) == SD_GET_CMD) {
+    const int machine_arg = this->argSearch(&cmd_args, "--machine");
+    const String transaction_id =
+        machine_arg >= 0 && machine_arg + 1 < cmd_args.size()
+            ? cmd_args.get(machine_arg + 1) : "";
+    if (machine_arg < 0) {
+      Serial.println(F("SD download requires --machine <transaction-id>"));
+      return;
+    }
+    if (!validTransactionId(transaction_id)) {
+      machineResult(transaction_id, SD_GET_CMD, "error",
+                    "INVALID_TRANSACTION");
+      return;
+    }
+
+    const int path_arg = this->argSearch(&cmd_args, "--path-hex");
+    if (path_arg < 0 || path_arg + 1 >= cmd_args.size()) {
+      machineResult(transaction_id, SD_GET_CMD, "error", "INVALID_PATH");
+      return;
+    }
+
+    #ifdef HAS_SD
+      if (!sd_obj.supported) {
+        machineSdSummary(transaction_id, SD_GET_CMD, "error",
+                         "SD_NOT_READY");
+        return;
+      }
+      if (wifi_scan_obj.scanning()) {
+        machineSdSummary(transaction_id, SD_GET_CMD, "error",
+                         "DEVICE_BUSY");
+        return;
+      }
+
+      char decoded_path[SD_TRANSFER_MAX_PATH_BYTES] = {};
+      if (!decodeSdPathHex(cmd_args.get(path_arg + 1).c_str(), decoded_path,
+                           sizeof(decoded_path)) ||
+          !isSafeSdFilePath(decoded_path)) {
+        machineSdSummary(transaction_id, SD_GET_CMD, "error",
+                         "INVALID_PATH");
+        return;
+      }
+
+      File file = SD.open(decoded_path, FILE_READ);
+      if (!file) {
+        machineSdSummary(transaction_id, SD_GET_CMD, "error",
+                         "PATH_NOT_FOUND");
+        return;
+      }
+      if (file.isDirectory()) {
+        file.close();
+        machineSdSummary(transaction_id, SD_GET_CMD, "error",
+                         "NOT_A_FILE");
+        return;
+      }
+
+      mbedtls_sha256_context sha_context;
+      mbedtls_sha256_init(&sha_context);
+      if (mbedtls_sha256_starts(&sha_context, 0) != 0) {
+        file.close();
+        mbedtls_sha256_free(&sha_context);
+        machineSdSummary(transaction_id, SD_GET_CMD, "error",
+                         "HASH_INIT_FAILED");
+        return;
+      }
+
+      const uint64_t file_size = file.size();
+      const String path(decoded_path);
+      this->showSdSessionStatus("DOWNLOADING", path, 0);
+      machineSdGetStarted(transaction_id, path, file_size);
+
+      uint8_t transfer_buffer[1024];
+      uint64_t transferred = 0;
+      int last_display_progress = -1;
+      const char* transfer_error = nullptr;
+      while (transferred < file_size) {
+        const uint64_t remaining = file_size - transferred;
+        const size_t requested = remaining > sizeof(transfer_buffer)
+                                     ? sizeof(transfer_buffer)
+                                     : static_cast<size_t>(remaining);
+        const size_t read_count = file.read(transfer_buffer, requested);
+        if (read_count == 0) {
+          transfer_error = "FILE_READ_FAILED";
+          break;
+        }
+        if (mbedtls_sha256_update(&sha_context, transfer_buffer,
+                                  read_count) != 0) {
+          transfer_error = "HASH_UPDATE_FAILED";
+          break;
+        }
+        const size_t write_count = Serial.write(transfer_buffer, read_count);
+        transferred += write_count;
+        if (file_size > 0) {
+          const int display_progress =
+              static_cast<int>(transferred * 100ULL / file_size);
+          if (display_progress >= last_display_progress + 5 ||
+              display_progress == 100) {
+            last_display_progress = display_progress;
+            this->showSdSessionStatus("DOWNLOADING", path,
+                                      display_progress);
+          }
+        }
+        if (write_count != read_count) {
+          transfer_error = "SERIAL_WRITE_FAILED";
+          break;
+        }
+        delay(0);
+      }
+      file.close();
+
+      if (transfer_error != nullptr && transferred < file_size)
+        writeTransferPadding(file_size - transferred);
+
+      uint8_t digest[32] = {};
+      if (transfer_error == nullptr &&
+          mbedtls_sha256_finish(&sha_context, digest) != 0)
+        transfer_error = "HASH_FINISH_FAILED";
+      mbedtls_sha256_free(&sha_context);
+
+      Serial.flush();
+      Serial.println();
+      if (transfer_error == nullptr) {
+        char digest_hex[65] = {};
+        static constexpr char hex[] = "0123456789abcdef";
+        for (size_t index = 0; index < sizeof(digest); ++index) {
+          digest_hex[index * 2] = hex[digest[index] >> 4];
+          digest_hex[index * 2 + 1] = hex[digest[index] & 0x0f];
+        }
+        machineSdGetFinished(transaction_id, "success", "OK",
+                             transferred, digest_hex);
+      }
+      else {
+        machineSdGetFinished(transaction_id, "error", transfer_error,
+                             transferred);
+      }
+    #else
+      machineResult(transaction_id, SD_GET_CMD, "error",
+                    "SD_NOT_SUPPORTED");
+    #endif
+  }
+
+  else if (cmd_args.get(0) == SD_PUT_CMD) {
+    const int machine_arg = this->argSearch(&cmd_args, "--machine");
+    const String transaction_id =
+        machine_arg >= 0 && machine_arg + 1 < cmd_args.size()
+            ? cmd_args.get(machine_arg + 1) : "";
+    if (machine_arg < 0) {
+      Serial.println(F("SD upload requires --machine <transaction-id>"));
+      return;
+    }
+    if (!validTransactionId(transaction_id)) {
+      machineResult(transaction_id, SD_PUT_CMD, "error",
+                    "INVALID_TRANSACTION");
+      return;
+    }
+
+    const int path_arg = this->argSearch(&cmd_args, "--path-hex");
+    const int bytes_arg = this->argSearch(&cmd_args, "--bytes");
+    const int digest_arg = this->argSearch(&cmd_args, "--sha256");
+    if (path_arg < 0 || path_arg + 1 >= cmd_args.size()) {
+      machineResult(transaction_id, SD_PUT_CMD, "error", "INVALID_PATH");
+      return;
+    }
+    if (bytes_arg < 0 || bytes_arg + 1 >= cmd_args.size()) {
+      machineResult(transaction_id, SD_PUT_CMD, "error", "INVALID_SIZE");
+      return;
+    }
+    if (digest_arg < 0 || digest_arg + 1 >= cmd_args.size()) {
+      machineResult(transaction_id, SD_PUT_CMD, "error", "INVALID_DIGEST");
+      return;
+    }
+
+    #ifdef HAS_SD
+      if (!sd_obj.supported) {
+        machineSdSummary(transaction_id, SD_PUT_CMD, "error",
+                         "SD_NOT_READY");
+        return;
+      }
+      if (wifi_scan_obj.scanning()) {
+        machineSdSummary(transaction_id, SD_PUT_CMD, "error",
+                         "DEVICE_BUSY");
+        return;
+      }
+
+      char decoded_path[SD_TRANSFER_MAX_PATH_BYTES] = {};
+      if (!decodeSdPathHex(cmd_args.get(path_arg + 1).c_str(), decoded_path,
+                           sizeof(decoded_path)) ||
+          !isEvilPortalHtmlUploadPath(decoded_path)) {
+        machineSdSummary(transaction_id, SD_PUT_CMD, "error",
+                         "INVALID_UPLOAD_PATH");
+        return;
+      }
+
+      errno = 0;
+      char* size_end = nullptr;
+      const String size_value = cmd_args.get(bytes_arg + 1);
+      const unsigned long parsed_size =
+          strtoul(size_value.c_str(), &size_end, 10);
+      if (errno == ERANGE || size_end == size_value.c_str() ||
+          *size_end != '\0' || parsed_size == 0 ||
+          parsed_size >= MAX_HTML_SIZE) {
+        machineSdSummary(transaction_id, SD_PUT_CMD, "error",
+                         "INVALID_SIZE");
+        return;
+      }
+      const size_t upload_size = static_cast<size_t>(parsed_size);
+
+      String expected_digest = cmd_args.get(digest_arg + 1);
+      if (!isSha256Hex(expected_digest.c_str())) {
+        machineSdSummary(transaction_id, SD_PUT_CMD, "error",
+                         "INVALID_DIGEST");
+        return;
+      }
+      expected_digest.toLowerCase();
+
+      const String destination(decoded_path);
+      const bool overwrite = this->argSearch(&cmd_args, "--overwrite") >= 0;
+      if (SD.exists(destination) && !overwrite) {
+        machineSdPutResult(transaction_id, "error", "FILE_EXISTS",
+                           &destination, 0);
+        return;
+      }
+      if (!sd_obj.ensureStorageLayout()) {
+        machineSdPutResult(transaction_id, "error", "DIRECTORY_FAILED",
+                           &destination, 0);
+        return;
+      }
+
+      const String staging = String(marauder::storage::EVIL_PORTAL_HTML_DIR) +
+                             "/.upload-" + transaction_id + ".part";
+      const String previous = String(marauder::storage::EVIL_PORTAL_HTML_DIR) +
+                              "/.upload-" + transaction_id + ".bak";
+      if ((SD.exists(staging) && !SD.remove(staging)) ||
+          (SD.exists(previous) && !SD.remove(previous))) {
+        machineSdPutResult(transaction_id, "error", "TEMP_CLEANUP_FAILED",
+                           &destination, 0);
+        return;
+      }
+
+      File output = SD.open(staging, FILE_WRITE);
+      if (!output || output.isDirectory()) {
+        if (output)
+          output.close();
+        machineSdPutResult(transaction_id, "error", "FILE_OPEN_FAILED",
+                           &destination, 0);
+        return;
+      }
+
+      mbedtls_sha256_context sha_context;
+      mbedtls_sha256_init(&sha_context);
+      if (mbedtls_sha256_starts(&sha_context, 0) != 0) {
+        output.close();
+        SD.remove(staging);
+        mbedtls_sha256_free(&sha_context);
+        machineSdPutResult(transaction_id, "error", "HASH_INIT_FAILED",
+                           &destination, 0);
+        return;
+      }
+
+      this->showSdSessionStatus("UPLOADING", destination, 0);
+      machineSdPutResult(transaction_id, "ready", "OK", &destination,
+                         upload_size);
+
+      constexpr uint32_t upload_idle_timeout_ms = 10000;
+      uint8_t transfer_buffer[1024];
+      size_t transferred = 0;
+      int last_display_progress = -1;
+      uint32_t last_data_ms = millis();
+      const char* transfer_error = nullptr;
+      while (transferred < upload_size) {
+        const int available = Serial.available();
+        if (available <= 0) {
+          if (millis() - last_data_ms >= upload_idle_timeout_ms) {
+            transfer_error = "TRANSFER_TIMEOUT";
+            break;
+          }
+          delay(1);
+          continue;
+        }
+
+        const size_t remaining = upload_size - transferred;
+        size_t requested = static_cast<size_t>(available);
+        if (requested > sizeof(transfer_buffer))
+          requested = sizeof(transfer_buffer);
+        if (requested > remaining)
+          requested = remaining;
+        const size_t read_count = Serial.readBytes(transfer_buffer, requested);
+        if (read_count == 0)
+          continue;
+        last_data_ms = millis();
+        transferred += read_count;
+        const int display_progress = static_cast<int>(
+            static_cast<uint64_t>(transferred) * 100ULL / upload_size);
+        if (display_progress >= last_display_progress + 5 ||
+            display_progress == 100) {
+          last_display_progress = display_progress;
+          this->showSdSessionStatus("UPLOADING", destination,
+                                    display_progress);
+        }
+
+        // Once a storage or hash error occurs, continue consuming the exact
+        // payload length so raw HTML bytes never leak into the command parser.
+        if (transfer_error != nullptr)
+          continue;
+        if (mbedtls_sha256_update(&sha_context, transfer_buffer,
+                                  read_count) != 0) {
+          transfer_error = "HASH_UPDATE_FAILED";
+          continue;
+        }
+        if (output.write(transfer_buffer, read_count) != read_count)
+          transfer_error = "FILE_WRITE_FAILED";
+        delay(0);
+      }
+
+      if (transfer_error == nullptr)
+        output.flush();
+      output.close();
+
+      uint8_t digest[32] = {};
+      if (transfer_error == nullptr &&
+          mbedtls_sha256_finish(&sha_context, digest) != 0)
+        transfer_error = "HASH_FINISH_FAILED";
+      mbedtls_sha256_free(&sha_context);
+
+      char digest_hex[65] = {};
+      if (transfer_error == nullptr) {
+        static constexpr char hex[] = "0123456789abcdef";
+        for (size_t index = 0; index < sizeof(digest); ++index) {
+          digest_hex[index * 2] = hex[digest[index] >> 4];
+          digest_hex[index * 2 + 1] = hex[digest[index] & 0x0f];
+        }
+        if (expected_digest != digest_hex)
+          transfer_error = "HASH_MISMATCH";
+      }
+
+      if (transfer_error != nullptr) {
+        SD.remove(staging);
+        machineSdPutResult(transaction_id, "error", transfer_error,
+                           &destination, transferred);
+        return;
+      }
+
+      const bool replacing = SD.exists(destination);
+      if (replacing && !SD.rename(destination, previous)) {
+        SD.remove(staging);
+        machineSdPutResult(transaction_id, "error", "BACKUP_FAILED",
+                           &destination, transferred);
+        return;
+      }
+      if (!SD.rename(staging, destination)) {
+        if (replacing)
+          SD.rename(previous, destination);
+        SD.remove(staging);
+        machineSdPutResult(transaction_id, "error", "COMMIT_FAILED",
+                           &destination, transferred);
+        return;
+      }
+      if (replacing && SD.exists(previous) && !SD.remove(previous))
+        Serial.println(F("Could not remove completed SD upload rollback file"));
+
+      evil_portal_obj.refreshHtmlFiles();
+      machineSdPutResult(transaction_id, "success", "OK", &destination,
+                         transferred, digest_hex);
+    #else
+      machineResult(transaction_id, SD_PUT_CMD, "error",
+                    "SD_NOT_SUPPORTED");
+    #endif
   }
 
   else if (cmd_args.get(0) == BACKUP_SPIFFS_CMD ||
@@ -776,15 +1484,20 @@ void CommandLine::runCommand(String input) {
           return;
         }
         delay(1000);
-        for (int i = 0; i < sd_obj.sd_files->size(); i++) {
-          if (sd_obj.sd_files->get(i).startsWith("wardrive_") || sd_obj.sd_files->get(i).startsWith("wigle-")) {
-            if (!sd_obj.sd_files->get(i).endsWith(".wigle") && !sd_obj.sd_files->get(i).endsWith(".wdg") && !sd_obj.sd_files->get(i).endsWith(".gpx")) {
-              Serial.println("Uploading " + sd_obj.sd_files->get(i) + "...");
-              if (wifi_scan_obj.uploadFile("/" + sd_obj.sd_files->get(i), true, upload_dest)) {
-                Serial.println("Upload OK");
-              } else {
-                Serial.println("WiGLE failed");
-              }
+        LinkedList<String> upload_files;
+        sd_obj.listDirToLinkedList(&upload_files,
+                                   marauder::storage::WARDRIVE_DIR);
+        sd_obj.listDirToLinkedList(&upload_files, "/");
+        for (int i = 0; i < upload_files.size(); i++) {
+          if (marauder::storage::isWardriveUploadCandidate(
+                  upload_files.get(i))) {
+            Serial.println("Uploading " + upload_files.get(i) + "...");
+            if (wifi_scan_obj.uploadFile(
+                    marauder::storage::withLeadingSlash(upload_files.get(i)),
+                    true, upload_dest)) {
+              Serial.println("Upload OK");
+            } else {
+              Serial.println("Upload failed");
             }
           }
         }
@@ -989,12 +1702,14 @@ void CommandLine::runCommand(String input) {
                                   "AP index"))
             return;
           if ((target_ap_index >= 0) && (target_ap_index < access_points->size())) {
-            evil_portal_obj.setAP(access_points->get(target_ap_index).essid);
+            for (int index = 0; index < access_points->size(); index++) {
+              AccessPoint access_point = access_points->get(index);
+              access_point.selected = index == target_ap_index;
+              access_points->set(index, access_point);
+            }
             AccessPoint new_ap = access_points->get(target_ap_index);
-            new_ap.selected = true;
-            access_points->set(target_ap_index, new_ap);
-
-            evil_portal_obj.ap_index = target_ap_index;
+            if (evil_portal_obj.setAP(new_ap.essid))
+              evil_portal_obj.setTargetAP(target_ap_index, new_ap.channel);
           }
         }
       }

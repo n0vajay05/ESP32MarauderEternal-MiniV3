@@ -37,6 +37,7 @@ https://www.online-utility.org/image/convert/to/XBM
 #endif
 
 #include "settings.h"
+#include "DeviceClock.h"
 #include "CommandLine.h"
 #include "lang_var.h"
 
@@ -75,6 +76,7 @@ EvilPortal evil_portal_obj;
 Buffer buffer_obj;
 Settings settings_obj;
 CommandLine cli_obj;
+DeviceClock device_clock_obj;
 
 #ifdef HAS_GPS
   GpsInterface gps_obj;
@@ -294,6 +296,7 @@ void setup()
   #endif
 
   Serial.begin(115200);
+  device_clock_obj.begin();
 
   #ifdef HAS_ACT_LED
     pinMode(ACT_LED_PIN, OUTPUT);
@@ -390,14 +393,8 @@ void setup()
     #endif
   #endif
 
-  settings_obj.begin();
-
-  const char* type = settings_obj.getSettingType("wu");
-
-  if (type == nullptr || type[0] == '\0') {
-    Serial.println(F("Current settings format not supported. Installing new default settings..."));
-    settings_obj.createDefaultSettings(SPIFFS);
-  }
+  if (!settings_obj.begin())
+    Serial.println(F("Settings initialization failed; using in-memory defaults"));
 
   #ifndef HAS_SIMPLEX_DISPLAY
     #if defined(HAS_SD)
@@ -496,6 +493,15 @@ void loop()
 
   // Update all of our objects
   cli_obj.main(currentTime);
+
+  if (cli_obj.sdSessionActive()) {
+    #ifdef HAS_GPS
+      gps_obj.main();
+    #endif
+    delay(2);
+    return;
+  }
+
   wifi_scan_obj.main(currentTime);
 
   #ifdef HAS_GPS

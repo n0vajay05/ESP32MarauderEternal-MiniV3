@@ -41,6 +41,42 @@ void Settings::_buildCache() {
   }
 }
 
+bool Settings::_commitDocument(DynamicJsonDocument& json,
+                               String& serialized) {
+  if (json.overflowed())
+    return false;
+
+  serialized = "";
+  if (serializeJson(json, serialized) == 0)
+    return false;
+
+  SPIFFS.remove("/settings.tmp");
+  File temporary = SPIFFS.open("/settings.tmp", FILE_WRITE);
+  if (!temporary || serializeJson(json, temporary) == 0 ||
+      temporary.getWriteError()) {
+    temporary.close();
+    SPIFFS.remove("/settings.tmp");
+    return false;
+  }
+  temporary.close();
+
+  SPIFFS.remove("/settings.backup");
+  const bool had_settings = SPIFFS.exists("/settings.json");
+  if (had_settings &&
+      !SPIFFS.rename("/settings.json", "/settings.backup")) {
+    SPIFFS.remove("/settings.tmp");
+    return false;
+  }
+  if (!SPIFFS.rename("/settings.tmp", "/settings.json")) {
+    if (had_settings)
+      SPIFFS.rename("/settings.backup", "/settings.json");
+    SPIFFS.remove("/settings.tmp");
+    return false;
+  }
+  SPIFFS.remove("/settings.backup");
+  return true;
+}
+
 // ---------------------------------------------------------------------------
 
 String Settings::getSettingsString() { return this->json_settings_string; }
@@ -74,10 +110,78 @@ bool Settings::begin() {
   String json_string;
   DynamicJsonDocument jsonBuffer(JSON_SETTING_SIZE);
   DeserializationError error = deserializeJson(jsonBuffer, settingsFile);
-  if (error)
+  settingsFile.close();
+  if (error) {
     Serial.println(error.f_str());
+    SPIFFS.remove("/settings.corrupt");
+    SPIFFS.rename("/settings.json", "/settings.corrupt");
+    return this->createDefaultSettings(SPIFFS);
+  }
 
-  serializeJson(jsonBuffer, json_string);
+  JsonArray settings = jsonBuffer["Settings"].as<JsonArray>();
+  if (settings.isNull()) {
+    jsonBuffer.remove("Settings");
+    settings = jsonBuffer.createNestedArray("Settings");
+  }
+
+  bool migrated = false;
+  const auto contains = [&settings](const char* key) {
+    for (JsonObject item : settings) {
+      if (strcmp(item["name"] | "", key) == 0)
+        return true;
+    }
+    return false;
+  };
+  const auto addBool = [&settings, &contains, &migrated](const char* key,
+                                                         bool value) {
+    if (contains(key))
+      return;
+    JsonObject item = settings.createNestedObject();
+    item["name"] = key;
+    item["type"] = "bool";
+    item["value"] = value;
+    item["range"]["min"] = false;
+    item["range"]["max"] = true;
+    migrated = true;
+  };
+  const auto addString = [&settings, &contains, &migrated](const char* key) {
+    if (contains(key))
+      return;
+    JsonObject item = settings.createNestedObject();
+    item["name"] = key;
+    item["type"] = "String";
+    item["value"] = "";
+    item["range"]["min"] = "";
+    item["range"]["max"] = "";
+    migrated = true;
+  };
+
+  addBool("ForcePMKID", false);
+  addBool("ForceProbe", false);
+  addBool("SavePCAP", true);
+  addBool("EnableLED", true);
+  addBool("EPDeauth", false);
+  addBool("ChanHop", false);
+  addString("ClientSSID");
+  addString("ClientPW");
+  addString("wu");
+  addString("wt");
+  addString(WDG_KEY_NAME);
+
+  if (jsonBuffer.overflowed()) {
+    Serial.println(F("Settings migration exceeded JSON capacity"));
+    return false;
+  }
+
+  if (migrated) {
+    if (!this->_commitDocument(jsonBuffer, json_string)) {
+      Serial.println(F("Could not commit migrated settings"));
+      return false;
+    }
+  }
+  else if (serializeJson(jsonBuffer, json_string) == 0) {
+    return false;
+  }
 
   this->json_settings_string = json_string;
 
@@ -241,16 +345,8 @@ template <> bool Settings::saveSetting<bool>(const char* key, bool value) {
     if (strcmp(setting_name, key) == 0) {
       json["Settings"][i]["value"] = value;
 
-      File settingsFile = SPIFFS.open("/settings.json", FILE_WRITE);
-
-      if (!settingsFile) {
+      if (!this->_commitDocument(json, settings_string))
         return false;
-      }
-
-      serializeJson(json, settingsFile);
-      serializeJson(json, settings_string);
-
-      settingsFile.close();
 
       this->json_settings_string = settings_string;
 
@@ -295,16 +391,8 @@ template <> bool Settings::saveSetting<bool>(const char* key, String value) {
     if (strcmp(setting_name, key) == 0) {
       json["Settings"][i]["value"] = value;
 
-      File settingsFile = SPIFFS.open("/settings.json", FILE_WRITE);
-
-      if (!settingsFile) {
+      if (!this->_commitDocument(json, settings_string))
         return false;
-      }
-
-      serializeJson(json, settingsFile);
-      serializeJson(json, settings_string);
-
-      settingsFile.close();
 
       this->json_settings_string = settings_string;
 
@@ -336,15 +424,12 @@ template <> bool Settings::saveSetting<bool>(const char* key, String value) {
 bool Settings::toggleSetting(const char* key) {
   // Use the cached value to decide direction — avoids an extra JSON parse.
   bool current = this->loadSetting<bool>(key);
-  if (current) {
-    saveSetting<bool>(key, false);
-    //Serial.println("Setting value to false");
-    return false;
-  } else {
-    saveSetting<bool>(key, true);
-    //Serial.println("Setting value to true");
-    return true;
+  const bool desired = !current;
+  if (!saveSetting<bool>(key, desired)) {
+    Serial.printf("Could not persist setting '%s'\n", key);
+    return current;
   }
+  return desired;
 }
 
 // ---------------------------------------------------------------------------

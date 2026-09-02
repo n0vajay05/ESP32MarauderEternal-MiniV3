@@ -129,6 +129,20 @@ class MenuFunctions
 {
   private:
 
+    enum class SSIDMenuMode : uint8_t {
+      Selection,
+      Deauth,
+      FoxHunt,
+      Finder,
+      EvilPortal,
+      EvilPortalAuto
+    };
+
+    enum class StationMenuMode : uint8_t {
+      Selection,
+      Deauth
+    };
+
     String u_result = "";
 
 
@@ -138,6 +152,8 @@ class MenuFunctions
     uint8_t mini_kb_index = 0;
     uint8_t old_gps_sat_count = 0;
     uint8_t max_graph_value = 0;
+    bool ap_deauth_start_pending = false;
+    bool station_deauth_start_pending = false;
 
     #ifdef HAS_MINI_SCREEN
       Menu* mini_marquee_menu = nullptr;
@@ -187,6 +203,8 @@ class MenuFunctions
     Menu wifiAPMenu;
     Menu ssidGroupMenu;
     Menu ssidAPMenu;
+    Menu stationSSIDMenu;
+    Menu stationListMenu;
     Menu wifiIPMenu;
     Menu ssidsMenu;
     //#ifdef HAS_BT
@@ -258,13 +276,24 @@ class MenuFunctions
     void showBLETargetDetails(int index, Menu* returnMenu, bool startFoxHunt);
     void buildEvilPortalActionMenu(const String& ssid);
     void buildEvilPortalCredentialsMenu();
-    void buildSSIDGroupMenu(bool fox_hunt_mode = false,
-                            bool finder_mode = false);
+    void buildSSIDGroupMenu(SSIDMenuMode mode = SSIDMenuMode::Selection);
     void buildSSIDAPMenu(const String& group_name,
-                         bool fox_hunt_mode = false);
+                         SSIDMenuMode mode = SSIDMenuMode::Selection);
+    void buildStationSSIDMenu(
+        StationMenuMode mode = StationMenuMode::Selection);
+    void buildSSIDStationMenu(
+        const String& group_name,
+        StationMenuMode mode = StationMenuMode::Selection);
+    uint16_t prepareSelectedStationTargets();
+    void releaseTransientWiFiSelectorMenus(const char* owner);
+    void clearAccessPointSelections();
+    bool startEvilPortalForSSIDGroup(const String& group_name);
+    bool startAutoEvilPortalForSSIDGroup(const String& group_name);
     #ifdef MARAUDER_MINI_V3
       void showMiniMenuError(const char* message, Menu* return_menu,
-                             uint16_t return_index);
+                             uint16_t return_index,
+                             const char* title = "FOX HUNT");
+      void clockMode();
     #endif
     void battery(bool initial = false);
     void battery2(bool initial = false);

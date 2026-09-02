@@ -30,19 +30,28 @@ if [[ "${INSTALLED_CORE_VERSION}" != "${EXPECTED_CORE_VERSION}" ]]; then
   exit 1
 fi
 
-"${ARDUINO_CLI}" compile \
+TZ=UTC "${ARDUINO_CLI}" compile \
   --warnings all \
   --fqbn "${FQBN}" \
   --libraries "${LIBRARY_DIR}" \
   --build-path "${CACHE_DIR}" \
   --build-property "compiler.cpp.extra_flags=-DMARAUDER_MINI_V3" \
   --build-property "compiler.c.extra_flags=-DMARAUDER_MINI_V3" \
-  --build-property "compiler.c.elf.extra_flags=-Wl,--wrap=ieee80211_raw_frame_sanity_check" \
+  --build-property "compiler.c.elf.extra_flags=-Wl,--wrap=ieee80211_raw_frame_sanity_check -Wl,--defsym=ieee80211_raw_frame_sanity_check=__wrap_ieee80211_raw_frame_sanity_check" \
   --output-dir "${BUILD_DIR}" \
   "${SKETCH_DIR}"
 
 APP_IMAGE="${BUILD_DIR}/MarauderEternal.ino.bin"
+MAP_FILE="${BUILD_DIR}/MarauderEternal.ino.map"
 APP_SIZE="$(stat -c '%s' "${APP_IMAGE}")"
+
+if ! grep -Eq \
+  'ieee80211_raw_frame_sanity_check[[:space:]]*=[[:space:]]*__wrap_ieee80211_raw_frame_sanity_check' \
+  "${MAP_FILE}"; then
+  echo "Raw-frame compatibility hook was not linked into the firmware." >&2
+  exit 1
+fi
+
 if (( APP_SIZE > APPLICATION_PARTITION_SIZE )); then
   echo "Application is ${APP_SIZE} bytes and exceeds the ${APPLICATION_PARTITION_SIZE}-byte OTA slot." >&2
   exit 1

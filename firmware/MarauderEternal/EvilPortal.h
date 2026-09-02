@@ -10,6 +10,7 @@
 
 #include "configs.h"
 #include "settings.h"
+#include "RsnCapabilities.h"
 #ifdef HAS_SCREEN
   #include "Display.h"
   #include <LinkedList.h>
@@ -34,7 +35,7 @@ extern Buffer buffer_obj;
 #define RESET_CMD "reset"
 #define START_CMD "start"
 #define ACK_CMD "ack"
-#define MAX_AP_NAME_SIZE 32
+#define MAX_AP_NAME_SIZE 33
 #define WIFI_SCAN_EVIL_PORTAL 30
 
 extern char apName[MAX_AP_NAME_SIZE];
@@ -61,7 +62,7 @@ struct AccessPoint {
  // LinkedList<char>* beacon;
   char beacon[2];
   int8_t rssi;
-  LinkedList<uint16_t>* stations;
+  LinkedList<uint16_t>* stations = nullptr;
   uint16_t packets;
   uint8_t sec;
   bool wps;
@@ -70,6 +71,7 @@ struct AccessPoint {
   bool has_msg_2;
   bool has_msg_3;
   bool has_msg_4;
+  PmfStatus pmf_status = PMF_STATUS_UNKNOWN;
   uint32_t last_seen_ms;
 };
 
@@ -111,6 +113,9 @@ class EvilPortal {
     String password;
 
     bool has_html;
+    int target_ap_index = -1;
+    uint8_t target_ap_channel = 1;
+    int session_credential_count = 0;
 
     DNSServer dnsServer;
 
@@ -119,16 +124,14 @@ class EvilPortal {
     bool setHtml();
     bool setAP(LinkedList<ssid>* ssids, LinkedList<AccessPoint>* access_points);
     void setupServer();
-    void startPortal();
-    void startAP();
+    bool startPortal();
+    bool startAP();
     void sendToDisplay(String msg);
     void loadCredentials();
     bool storeCredential(const String& username, const String& password);
     bool installHtml(const char* html, size_t length);
 
   public:
-    int ap_index = -1;
-
     String target_html_name = "index.html";
     uint8_t selected_html_index = 0;
 
@@ -141,12 +144,21 @@ class EvilPortal {
     void cleanup();
     int getCredentialCount();
     String getCredentialDisplayLabel(int index);
+    const PortalCredential* getCredential(int index);
+    int getSessionCredentialCount();
+    const PortalCredential* getSessionCredential(int index);
+    uint8_t getConnectedClientCount();
+    bool isRunning() const;
     bool clearCredentials();
     String get_user_name();
     String get_password();
     bool setAP(String essid);
     bool setAPFromConfig();
+    void setTargetAP(int index, uint8_t channel);
+    int getTargetAPIndex() const;
+    uint8_t getTargetAPChannel() const;
     void setup();
+    void refreshHtmlFiles();
     bool begin(LinkedList<ssid>* ssids, LinkedList<AccessPoint>* access_points);
     void main(uint8_t scan_mode);
     void setHtmlFromSerial();

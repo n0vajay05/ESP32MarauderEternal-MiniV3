@@ -18,21 +18,26 @@ class Buffer {
     Buffer(const Buffer&) = delete;
     Buffer& operator=(const Buffer&) = delete;
 
-    void pcapOpen(const char* file_name, fs::FS* fs, bool serial);
+    void pcapOpen(const char* file_name, fs::FS* fs, bool serial,
+                  const char* directory = "/captures");
     void logOpen(const char* file_name, fs::FS* fs, bool serial,
-                 bool force = false);
-    void gpxOpen(const char* file_name, fs::FS* fs, bool serial);
+                 bool force = false, const char* directory = "/logs");
+    void gpxOpen(const char* file_name, fs::FS* fs, bool serial,
+                 const char* directory = "/gps");
     void append(wifi_promiscuous_pkt_t* packet, int len);
     void append(String log);
     void save();
+    void flush();
     String getFileName();
 
   private:
-    bool createFile(const char* name, bool is_pcap, bool is_gpx = false);
+    bool createFile(const char* name, const char* directory, bool is_pcap,
+                    bool is_gpx = false);
     bool ensureAllocated();
     void open(bool is_pcap);
     void openFile(const char* file_name, fs::FS* fs, bool serial,
-                  bool is_pcap, bool is_gpx = false, bool force = false);
+                  bool is_pcap, bool is_gpx = false, bool force = false,
+                  const char* directory = "/logs");
     bool add(const uint8_t* data, uint32_t len, bool is_pcap);
     bool write(const uint8_t* data, uint32_t len);
     bool saveFs(const uint8_t* data, uint32_t len);

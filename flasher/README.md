@@ -1,8 +1,9 @@
 # Marauder Eternal Flasher
 
-This is a one-click desktop flasher for the Marauder Mini V3 with an ESP32-C5
-and 8 MB flash. Packaged applications include the verified Marauder Eternal
-1.15.1 full-device image and also allow the user to choose another `.bin`.
+Flasher 1.3.5 is a one-click desktop flasher for the Marauder Mini V3 with an
+ESP32-C5 and 8 MB flash. Packaged applications include the verified Marauder
+Eternal 1.15.5 full-device image and also allow the user to choose another
+`.bin`.
 
 ## Use the application
 
@@ -15,6 +16,40 @@ and 8 MB flash. Packaged applications include the verified Marauder Eternal
 5. Click **Connect & Flash** once.
 6. Leave the device connected until the progress bar reaches 100% and the app
    reports success.
+
+## Copy files from the SD card
+
+1. Start the device normally and stop any active scan, capture, attack, or Evil
+   Portal session.
+2. Select its serial device in the flasher and click **SD Files — Browse &
+   Download**.
+3. Click **Refresh**, select one or more files, then use **Download Selected**.
+   Use **Download All** to copy the complete SD directory structure.
+
+To install a captive-portal template, click **Upload Evil Portal HTML** and
+choose a non-empty `.html` file smaller than 30,000 bytes. The flasher stores it
+under `/evil_portal/html`, verifies its SHA-256 digest before committing it, and
+asks before replacing a template with the same name. The device refreshes its
+**Select EP HTML File** list as soon as the upload completes.
+
+The SD card can remain installed in the Mini V3. Transfers use the normal USB
+serial connection, preserve folders during batch downloads, and verify every
+file with SHA-256 before replacing its destination. Interrupted HTML uploads
+leave the prior template intact. Files such as Evil Portal credentials may
+contain sensitive data and should be handled securely.
+
+The SD Files window keeps one serial connection open for its full lifetime, so
+listing, downloading, and uploading do not repeatedly reset the device. While
+the window is connected, the Mini V3 shows the current USB SD operation and
+locks its normal menus. Close the window to return to normal operation; holding
+the device's center button also provides an emergency exit.
+
+The enlarged SD Files window shows a prominent red activity message while its
+file list is loading and throughout downloads, uploads, and session shutdown,
+so a serial operation is never mistaken for an unresponsive application.
+The status, progress, and action rows are reserved independently of the file
+list, keeping Refresh, Upload, Download All, and Download Selected visible at
+the initial window size and under desktop display scaling.
 
 The app validates the selected image, detects its safe address, requires an
 ESP32-C5 response before writing, shows live write progress, and reports a

@@ -41,6 +41,7 @@ class Settings {
     } _cache;
 
     void _buildCache();  // parse json_settings_string -> _cache
+    bool _commitDocument(DynamicJsonDocument& json, String& serialized);
 
   public:
     bool begin();

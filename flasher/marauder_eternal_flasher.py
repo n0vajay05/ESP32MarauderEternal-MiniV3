@@ -9,11 +9,15 @@ import json
 import os
 import queue
 import re
+import secrets
 import struct
 import sys
+import tempfile
 import threading
+import time
 import traceback
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import Callable, Iterable
 
@@ -21,8 +25,10 @@ import tkinter as tk
 from tkinter import filedialog, font as tkfont, messagebox, ttk
 
 try:
+    import serial
     from serial.tools import list_ports
 except ImportError:  # Shown as a useful GUI error instead of failing at import.
+    serial = None
     list_ports = None
 
 
@@ -66,6 +72,30 @@ FLASH_BAUD = "460800"
 MIN_ACTIVITY_LINES = 7
 DEFAULT_WINDOW_WIDTH = 720
 DEFAULT_WINDOW_HEIGHT = 720
+# Keep the browser comfortably larger than its original 1080 x 760 layout.
+SD_WINDOW_WIDTH = 1296
+SD_WINDOW_HEIGHT = 988
+SD_WINDOW_MIN_WIDTH = 1080
+SD_WINDOW_MIN_HEIGHT = 845
+SD_FILES_LOADING_TEXT = "SD Card Files Loading...."
+SD_FILES_DOWNLOADING_TEXT = "SD Card Files Downloading...."
+SD_FILE_UPLOADING_TEXT = "SD Card File Uploading...."
+SD_MODE_CLOSING_TEXT = "SD Card Mode Closing...."
+SD_SERIAL_BAUD = 115200
+SD_SERIAL_READY_TIMEOUT = 20.0
+SD_SERIAL_PROMPT = b"\n> "
+SD_PROTOCOL_PREFIX = b"@MARAUDER:"
+SD_PROTOCOL_VERSION = 1
+SD_TRANSFER_MAX_PATH_BYTES = 512
+SD_SESSION_CAPABILITY = "sd-session"
+SD_REQUIRED_CAPABILITIES = frozenset(
+    ("sd-list", "sd-download", SD_SESSION_CAPABILITY)
+)
+SD_UPLOAD_CAPABILITY = "sd-upload"
+SD_MAX_LIST_ENTRIES = 10000
+EVIL_PORTAL_HTML_DIR = "/evil_portal/html"
+EVIL_PORTAL_MAX_HTML_BYTES = 30000
+EVIL_PORTAL_MAX_FILENAME_BYTES = 240
 
 ANSI_ESCAPE_RE = re.compile(r"\x1b(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])")
 PERCENT_RE = re.compile(r"(?<![\d.])(100(?:\.0+)?|\d{1,2}(?:\.\d+)?)\s*%")
@@ -125,6 +155,25 @@ class FirmwareIdentity:
     chip: str
     version: str
     partition_layout: str
+
+
+@dataclass(frozen=True)
+class SdFileEntry:
+    path: str
+    size: int
+    modified: int = 0
+
+    @property
+    def name(self) -> str:
+        return self.path.rsplit("/", 1)[-1]
+
+
+class SdProtocolError(RuntimeError):
+    """Raised when SD serial transfer negotiation or validation fails."""
+
+    def __init__(self, message: str, code: str = "PROTOCOL_ERROR") -> None:
+        super().__init__(message)
+        self.code = code
 
 
 def resource_path() -> Path:
@@ -475,6 +524,448 @@ def invoke_esptool(arguments: list[str], output: Callable[[str], None]) -> None:
         capture.flush()
 
 
+def validate_sd_path(path: str) -> str:
+    if not path.startswith("/") or path == "/" or path.endswith("/"):
+        raise SdProtocolError("The device returned an invalid SD file path.", "INVALID_PATH")
+    if "\\" in path or any(ord(character) < 0x20 for character in path):
+        raise SdProtocolError("The device returned an unsafe SD file path.", "INVALID_PATH")
+    components = path[1:].split("/")
+    if any(component in ("", ".", "..") for component in components):
+        raise SdProtocolError("The device returned an unsafe SD file path.", "INVALID_PATH")
+    try:
+        encoded = path.encode("utf-8")
+    except UnicodeEncodeError as error:
+        raise SdProtocolError("The SD file path is not valid UTF-8.", "INVALID_PATH") from error
+    if len(encoded) >= SD_TRANSFER_MAX_PATH_BYTES:
+        raise SdProtocolError("The SD file path is too long to transfer safely.", "INVALID_PATH")
+    return path
+
+
+def encode_sd_path(path: str) -> str:
+    return validate_sd_path(path).encode("utf-8").hex()
+
+
+def decode_sd_path(encoded: object) -> str:
+    if not isinstance(encoded, str) or not encoded or len(encoded) % 2:
+        raise SdProtocolError("The device returned an invalid encoded SD path.", "INVALID_PATH")
+    try:
+        raw = bytes.fromhex(encoded)
+        path = raw.decode("utf-8")
+    except (ValueError, UnicodeDecodeError) as error:
+        raise SdProtocolError("The device returned an invalid encoded SD path.", "INVALID_PATH") from error
+    return validate_sd_path(path)
+
+
+def local_path_for_sd(destination: Path, sd_path: str) -> Path:
+    path = validate_sd_path(sd_path)
+    root = destination.expanduser().resolve()
+    candidate = root.joinpath(*path[1:].split("/")).resolve()
+    try:
+        common = Path(os.path.commonpath((str(root), str(candidate))))
+    except ValueError as error:
+        raise SdProtocolError("The local destination is not safe.", "INVALID_DESTINATION") from error
+    if common != root:
+        raise SdProtocolError("The local destination escapes the chosen folder.", "INVALID_DESTINATION")
+    return candidate
+
+
+def evil_portal_upload_path(source: Path) -> str:
+    name = source.name
+    if source.suffix.casefold() != ".html":
+        raise SdProtocolError(
+            "Select an HTML file for the Evil Portal template.",
+            "INVALID_UPLOAD_PATH",
+        )
+    stem = name[: -len(source.suffix)]
+    if not stem:
+        raise SdProtocolError(
+            "The Evil Portal HTML file needs a filename before .html.",
+            "INVALID_UPLOAD_PATH",
+        )
+    filename = stem + ".html"
+    if len(filename.encode("utf-8")) > EVIL_PORTAL_MAX_FILENAME_BYTES:
+        raise SdProtocolError(
+            "The Evil Portal HTML filename is too long.",
+            "INVALID_UPLOAD_PATH",
+        )
+    return validate_sd_path(f"{EVIL_PORTAL_HTML_DIR}/{filename}")
+
+
+def format_file_size(size: int) -> str:
+    value = float(max(0, size))
+    units = ("B", "KB", "MB", "GB")
+    unit = units[0]
+    for unit in units:
+        if value < 1024.0 or unit == units[-1]:
+            break
+        value /= 1024.0
+    return f"{int(value)} {unit}" if unit == "B" else f"{value:.1f} {unit}"
+
+
+def format_modified(timestamp: int) -> str:
+    if timestamp <= 0:
+        return "—"
+    try:
+        return datetime.fromtimestamp(timestamp).strftime("%Y-%m-%d %H:%M")
+    except (OSError, OverflowError, ValueError):
+        return "—"
+
+
+def parse_sd_protocol_message(line: bytes | str) -> dict[str, object] | None:
+    raw = line.encode("utf-8", "replace") if isinstance(line, str) else line
+    marker = raw.find(SD_PROTOCOL_PREFIX)
+    if marker < 0:
+        return None
+    payload = raw[marker + len(SD_PROTOCOL_PREFIX) :].strip()
+    try:
+        message = json.loads(payload.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise SdProtocolError("The device returned a malformed protocol message.") from error
+    if not isinstance(message, dict) or message.get("protocol") != SD_PROTOCOL_VERSION:
+        raise SdProtocolError("The device uses an unsupported serial protocol version.")
+    return message
+
+
+def _message_integer(message: dict[str, object], name: str) -> int:
+    value = message.get(name)
+    if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+        raise SdProtocolError(f"The device returned an invalid {name} value.")
+    return value
+
+
+def friendly_sd_failure(error: BaseException) -> str:
+    code = getattr(error, "code", "")
+    if code == "DEVICE_BUSY":
+        return "Stop the active scan, capture, attack, or portal task on the device, then refresh SD Files."
+    if code in ("SD_NOT_READY", "SD_NOT_SUPPORTED"):
+        return "The SD card is not mounted. Reinsert it, wait for the main menu, and try again."
+    if code == "PATH_NOT_FOUND":
+        return "The selected SD file no longer exists. Refresh the file list and try again."
+    if code in ("INVALID_PATH", "NOT_A_FILE"):
+        return "The selected SD path is not a downloadable file. Refresh the file list."
+    if code == "INVALID_UPLOAD_PATH":
+        return "Only named .html files can be uploaded directly to /evil_portal/html."
+    if code == "INVALID_SIZE":
+        return "The Evil Portal template must be non-empty and smaller than 30,000 bytes."
+    if code == "FILE_EXISTS":
+        return "That Evil Portal template already exists. Confirm replacement and try again."
+    if code == "CAPABILITY_MISSING":
+        return "This device firmware does not support SD Files yet. Flash the included current firmware first."
+    if code == "UPLOAD_CAPABILITY_MISSING":
+        return "This device firmware does not support SD uploads yet. Flash the included current firmware first."
+    if code == "HASH_MISMATCH":
+        return "The SD transfer failed SHA-256 verification and was not committed. Try again."
+    if code == "TRANSFER_TIMEOUT":
+        return "The SD transfer timed out. Check the USB cable and make sure the device remains powered."
+    if code in (
+        "DIRECTORY_FAILED", "TEMP_CLEANUP_FAILED", "FILE_OPEN_FAILED",
+        "FILE_WRITE_FAILED", "BACKUP_FAILED", "COMMIT_FAILED",
+    ):
+        return "The device could not safely write the Evil Portal template. Check SD free space and card health."
+    text = str(error).lower()
+    if "permission" in text or "access is denied" in text:
+        return "The serial port could not be opened. Close serial monitors and check port permissions."
+    if "could not open" in text or "no such file" in text or "disconnected" in text:
+        return "The selected device disconnected. Reconnect it, refresh the port list, and try again."
+    return str(error) or "The SD file operation did not complete."
+
+
+class SdSerialClient:
+    """Machine-protocol client for listing and downloading Mini V3 SD files."""
+
+    def __init__(self, port: str, connection: object | None = None) -> None:
+        self.port = port
+        self.connection = connection
+        self._owns_connection = connection is None
+
+    def __enter__(self) -> "SdSerialClient":
+        if self.connection is not None:
+            return self
+        if serial is None:
+            raise RuntimeError("pyserial is missing from the flasher package.")
+
+        connection = serial.Serial(port=None, baudrate=SD_SERIAL_BAUD,
+                                   timeout=0.25, write_timeout=5)
+        connection.dtr = False
+        connection.rts = False
+        if os.name == "posix":
+            connection.exclusive = True
+        connection.port = self.port
+        connection.open()
+        # Opening the Mini V3's CP2102N port can pulse the ESP32-C5 reset
+        # lines.  Do not send a machine command until the firmware has
+        # completed setup and printed its command prompt.  In particular,
+        # do not mistake the "heap ... -> ..." boot message for that prompt.
+        original_timeout = connection.timeout
+        try:
+            connection.timeout = SD_SERIAL_READY_TIMEOUT
+            connection.read_until(SD_SERIAL_PROMPT, 65536)
+        finally:
+            connection.timeout = original_timeout
+        connection.reset_input_buffer()
+        self.connection = connection
+        return self
+
+    def __exit__(self, _type: object, _value: object, _traceback: object) -> None:
+        self.close()
+
+    def close(self) -> None:
+        if self.connection is not None and self._owns_connection:
+            self.connection.close()  # type: ignore[attr-defined]
+            self.connection = None
+
+    def _send(self, command: str) -> None:
+        if self.connection is None:
+            raise SdProtocolError("The serial connection is not open.")
+        payload = (command + "\n").encode("ascii")
+        self.connection.write(payload)  # type: ignore[attr-defined]
+        self.connection.flush()  # type: ignore[attr-defined]
+
+    def _read_message(self, transaction: str, command: str,
+                      timeout: float = 8.0) -> dict[str, object]:
+        if self.connection is None:
+            raise SdProtocolError("The serial connection is not open.")
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            line = self.connection.read_until(b"\n", 4096)  # type: ignore[attr-defined]
+            if not line:
+                continue
+            message = parse_sd_protocol_message(line)
+            if message is None:
+                continue
+            if message.get("tx") != transaction or message.get("command") != command:
+                continue
+            if message.get("status") == "error":
+                code = str(message.get("code", "DEVICE_ERROR"))
+                raise SdProtocolError(f"Device reported {code}.", code)
+            return message
+        raise SdProtocolError("Timed out waiting for the device response.", "TRANSFER_TIMEOUT")
+
+    def protocol_info(
+        self,
+        required_capabilities: frozenset[str] = SD_REQUIRED_CAPABILITIES,
+    ) -> dict[str, object]:
+        transaction = secrets.token_hex(8)
+        self._send(f"protocolinfo --machine {transaction}")
+        message = self._read_message(transaction, "protocolinfo")
+        if message.get("status") != "success":
+            raise SdProtocolError("The device did not complete protocol negotiation.")
+        capabilities = message.get("capabilities")
+        if not isinstance(capabilities, list) or not all(
+                isinstance(capability, str) for capability in capabilities):
+            raise SdProtocolError("The device returned invalid capability information.")
+        missing = required_capabilities - set(capabilities)
+        if missing:
+            code = (
+                "UPLOAD_CAPABILITY_MISSING"
+                if missing == {SD_UPLOAD_CAPABILITY}
+                else "CAPABILITY_MISSING"
+            )
+            raise SdProtocolError(
+                "The connected firmware does not provide SD file transfer.",
+                code,
+            )
+        return message
+
+    def set_session(self, active: bool) -> None:
+        transaction = secrets.token_hex(8)
+        state = "begin" if active else "end"
+        self._send(
+            f"sdsession --machine {transaction} --state {state}"
+        )
+        message = self._read_message(transaction, "sdsession", timeout=5.0)
+        if message.get("status") != "success":
+            raise SdProtocolError("The device did not change SD transfer mode.")
+
+    def list_files(self) -> list[SdFileEntry]:
+        transaction = secrets.token_hex(8)
+        self._send(f"sdlist --machine {transaction}")
+        entries: list[SdFileEntry] = []
+        seen: set[str] = set()
+        started = False
+        while True:
+            message = self._read_message(transaction, "sdlist")
+            status = message.get("status")
+            if status == "started":
+                if started:
+                    raise SdProtocolError("The device restarted the SD file listing unexpectedly.")
+                started = True
+            elif status == "file":
+                if not started:
+                    raise SdProtocolError("The SD listing started without a header.")
+                path = decode_sd_path(message.get("pathHex"))
+                if path in seen:
+                    raise SdProtocolError("The device returned a duplicate SD file path.")
+                seen.add(path)
+                entries.append(SdFileEntry(
+                    path=path,
+                    size=_message_integer(message, "bytes"),
+                    modified=_message_integer(message, "modified"),
+                ))
+                if len(entries) > SD_MAX_LIST_ENTRIES:
+                    raise SdProtocolError("The SD card contains too many files to display safely.")
+            elif status == "success":
+                if not started:
+                    raise SdProtocolError("The SD listing completed without starting.")
+                if _message_integer(message, "files") != len(entries):
+                    raise SdProtocolError("The SD listing file count did not match.")
+                expected_bytes = sum(entry.size for entry in entries)
+                if _message_integer(message, "bytes") != expected_bytes:
+                    raise SdProtocolError("The SD listing byte count did not match.")
+                return sorted(entries, key=lambda entry: entry.path.casefold())
+            else:
+                raise SdProtocolError("The device returned an unknown SD listing state.")
+
+    def download_file(
+        self,
+        entry: SdFileEntry,
+        destination: Path,
+        progress: Callable[[int, int], None] | None = None,
+    ) -> Path:
+        transaction = secrets.token_hex(8)
+        encoded_path = encode_sd_path(entry.path)
+        self._send(
+            f"sdget --machine {transaction} --path-hex {encoded_path}"
+        )
+        header = self._read_message(transaction, "sdget")
+        if header.get("status") != "started":
+            raise SdProtocolError("The SD download did not return a start header.")
+        if decode_sd_path(header.get("pathHex")) != entry.path:
+            raise SdProtocolError("The device returned a different SD file path.")
+        expected_size = _message_integer(header, "bytes")
+
+        destination = destination.expanduser()
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        temporary_fd, temporary_name = tempfile.mkstemp(
+            prefix=f".{destination.name}.", suffix=".part",
+            dir=str(destination.parent),
+        )
+        os.close(temporary_fd)
+        temporary = Path(temporary_name)
+        digest = hashlib.sha256()
+        transferred = 0
+        try:
+            if self.connection is None:
+                raise SdProtocolError("The serial connection is not open.")
+            idle_deadline = time.monotonic() + 8.0
+            with temporary.open("wb") as output:
+                while transferred < expected_size:
+                    requested = min(16 * 1024, expected_size - transferred)
+                    block = self.connection.read(requested)  # type: ignore[attr-defined]
+                    if not block:
+                        if time.monotonic() >= idle_deadline:
+                            raise SdProtocolError(
+                                "Timed out while receiving SD file data.",
+                                "TRANSFER_TIMEOUT",
+                            )
+                        continue
+                    idle_deadline = time.monotonic() + 8.0
+                    output.write(block)
+                    digest.update(block)
+                    transferred += len(block)
+                    if progress is not None:
+                        progress(transferred, expected_size)
+
+            trailer = self._read_message(transaction, "sdget", timeout=12.0)
+            if trailer.get("status") != "success":
+                raise SdProtocolError("The SD download did not complete successfully.")
+            if _message_integer(trailer, "bytes") != expected_size:
+                raise SdProtocolError("The SD download byte count did not match.")
+            expected_digest = trailer.get("sha256")
+            if not isinstance(expected_digest, str) or not re.fullmatch(
+                    r"[0-9a-f]{64}", expected_digest):
+                raise SdProtocolError("The device returned an invalid file digest.")
+            if digest.hexdigest() != expected_digest:
+                raise SdProtocolError(
+                    "The SD download digest did not match.", "HASH_MISMATCH"
+                )
+            os.replace(temporary, destination)
+            if entry.modified > 0:
+                with contextlib.suppress(OSError, OverflowError, ValueError):
+                    os.utime(destination, (entry.modified, entry.modified))
+            return destination
+        except Exception:
+            with contextlib.suppress(OSError):
+                temporary.unlink()
+            raise
+
+    def upload_evil_portal_html(
+        self,
+        source: Path,
+        overwrite: bool = False,
+        progress: Callable[[int, int], None] | None = None,
+    ) -> SdFileEntry:
+        source = source.expanduser()
+        if not source.is_file():
+            raise SdProtocolError("The selected HTML file does not exist.")
+        destination = evil_portal_upload_path(source)
+        size = source.stat().st_size
+        if size <= 0 or size >= EVIL_PORTAL_MAX_HTML_BYTES:
+            raise SdProtocolError(
+                "The Evil Portal HTML file has an unsupported size.",
+                "INVALID_SIZE",
+            )
+
+        digest = hashlib.sha256()
+        with source.open("rb") as input_file:
+            for block in iter(lambda: input_file.read(16 * 1024), b""):
+                digest.update(block)
+        digest_hex = digest.hexdigest()
+
+        transaction = secrets.token_hex(8)
+        command = (
+            f"sdput --machine {transaction} --path-hex {encode_sd_path(destination)} "
+            f"--bytes {size} --sha256 {digest_hex}"
+        )
+        if overwrite:
+            command += " --overwrite"
+        self._send(command)
+
+        header = self._read_message(transaction, "sdput", timeout=12.0)
+        if header.get("status") != "ready":
+            raise SdProtocolError("The SD upload did not return a ready header.")
+        if decode_sd_path(header.get("pathHex")) != destination:
+            raise SdProtocolError("The device returned a different SD upload path.")
+        if _message_integer(header, "bytes") != size:
+            raise SdProtocolError("The device returned a different SD upload size.")
+        if self.connection is None:
+            raise SdProtocolError("The serial connection is not open.")
+
+        transferred = 0
+        with source.open("rb") as input_file:
+            while transferred < size:
+                block = input_file.read(min(4096, size - transferred))
+                if not block:
+                    raise SdProtocolError(
+                        "The local HTML file changed during upload.",
+                        "HASH_MISMATCH",
+                    )
+                written = self.connection.write(block)  # type: ignore[attr-defined]
+                if written != len(block):
+                    raise SdProtocolError(
+                        "The serial connection accepted only part of the upload.",
+                        "TRANSFER_TIMEOUT",
+                    )
+                transferred += written
+                if progress is not None:
+                    progress(transferred, size)
+        self.connection.flush()  # type: ignore[attr-defined]
+
+        trailer = self._read_message(transaction, "sdput", timeout=15.0)
+        if trailer.get("status") != "success":
+            raise SdProtocolError("The SD upload did not complete successfully.")
+        if _message_integer(trailer, "bytes") != size:
+            raise SdProtocolError("The SD upload byte count did not match.")
+        if decode_sd_path(trailer.get("pathHex")) != destination:
+            raise SdProtocolError("The device committed a different SD upload path.")
+        returned_digest = trailer.get("sha256")
+        if returned_digest != digest_hex:
+            raise SdProtocolError(
+                "The uploaded file digest did not match.", "HASH_MISMATCH"
+            )
+        return SdFileEntry(destination, size, 0)
+
+
 class FlasherApp:
     BACKGROUND = "#0b0f14"
     PANEL = "#141b22"
@@ -485,6 +976,7 @@ class FlasherApp:
     ACCENT_ACTIVE = "#897bf2"
     SUCCESS = "#35c78b"
     ERROR = "#ef6461"
+    BRIGHT_ERROR = "#ff2b2b"
 
     def __init__(self, root: tk.Tk) -> None:
         self.root = root
@@ -492,6 +984,12 @@ class FlasherApp:
         self.ports: list[PortEntry] = []
         self.port_by_label: dict[str, PortEntry] = {}
         self.flashing = False
+        self.sd_busy = False
+        self.sd_window: tk.Toplevel | None = None
+        self.sd_client: SdSerialClient | None = None
+        self.quit_after_sd_close = False
+        self.sd_entries: list[SdFileEntry] = []
+        self.sd_entry_by_item: dict[str, SdFileEntry] = {}
         self.raw_output: list[str] = []
         self.highest_progress = 0.0
         self.firmware = inspect_firmware(resource_path(), included=True)
@@ -503,6 +1001,10 @@ class FlasherApp:
         self.status_var = tk.StringVar(value="Connect a Marauder Mini V3 to begin")
         self.percent_var = tk.StringVar(value="0%")
         self.progress_var = tk.DoubleVar(value=0.0)
+        self.sd_status_var = tk.StringVar(value="Connect to read the SD card")
+        self.sd_activity_var = tk.StringVar(value="")
+        self.sd_progress_var = tk.DoubleVar(value=0.0)
+        self.sd_progress_text_var = tk.StringVar(value="")
         self._update_firmware_warning()
 
         self._configure_window()
@@ -571,6 +1073,33 @@ class FlasherApp:
             darkcolor=self.ERROR,
             thickness=18,
         )
+        self.sd_tree_font = tkfont.nametofont("TkDefaultFont").copy()
+        self.sd_tree_font.configure(size=11)
+        self.sd_tree_heading_font = tkfont.nametofont("TkDefaultFont").copy()
+        self.sd_tree_heading_font.configure(size=10, weight="bold")
+        style.configure(
+            "Sd.Treeview",
+            background=self.PANEL,
+            fieldbackground=self.PANEL,
+            foreground=self.TEXT,
+            font=self.sd_tree_font,
+            rowheight=max(36, self.sd_tree_font.metrics("linespace") + 14),
+            bordercolor="#334155",
+        )
+        style.map(
+            "Sd.Treeview",
+            background=[("selected", self.ACCENT)],
+            foreground=[("selected", "white")],
+        )
+        style.configure(
+            "Sd.Treeview.Heading",
+            background=self.PANEL_ALT,
+            foreground=self.TEXT,
+            font=self.sd_tree_heading_font,
+            padding=(8, 8),
+            relief="flat",
+        )
+        style.map("Sd.Treeview.Heading", background=[("active", "#2a3744")])
 
     def _label(
         self,
@@ -703,6 +1232,22 @@ class FlasherApp:
             cursor="hand2",
         )
         self.flash_button.pack(fill="x")
+        self.sd_files_button = tk.Button(
+            panel,
+            text="SD Files — Browse & Download",
+            command=self.open_sd_files,
+            background=self.PANEL_ALT,
+            foreground=self.TEXT,
+            activebackground="#2a3744",
+            activeforeground=self.TEXT,
+            disabledforeground="#7c8491",
+            relief="flat",
+            font=("TkDefaultFont", 10, "bold"),
+            padx=16,
+            pady=10,
+            cursor="hand2",
+        )
+        self.sd_files_button.pack(fill="x", pady=(8, 0))
         self._label(
             panel,
             textvariable=self.firmware_warning_var,
@@ -761,7 +1306,7 @@ class FlasherApp:
 
         self._label(
             outer,
-            f"Flasher {APP_VERSION}  •  Included image plus selectable .bin support",
+            f"Flasher {APP_VERSION}  •  Firmware flashing and verified SD downloads",
             8,
             "#657384",
         ).pack(anchor="e", pady=(10, 0))
@@ -806,7 +1351,7 @@ class FlasherApp:
             self.status_var.set("Ready to connect and flash")
 
     def choose_firmware(self) -> None:
-        if self.flashing:
+        if self.flashing or self.sd_busy:
             return
         selected = filedialog.askopenfilename(
             parent=self.root,
@@ -838,7 +1383,7 @@ class FlasherApp:
         self._select_firmware(firmware, str(firmware.path))
 
     def use_included_firmware(self) -> None:
-        if self.flashing:
+        if self.flashing or self.sd_busy:
             return
         try:
             firmware = inspect_firmware(resource_path(), included=True)
@@ -848,7 +1393,8 @@ class FlasherApp:
         self._select_firmware(firmware, f"Included Marauder Eternal {FIRMWARE_VERSION}")
 
     def refresh_ports(self) -> None:
-        if self.flashing:
+        if (self.flashing or self.sd_busy or
+                (self.sd_window is not None and self.sd_window.winfo_exists())):
             return
         selected_device = self.selected_port()
         self.ports = discover_ports()
@@ -865,6 +1411,7 @@ class FlasherApp:
             self.port_var.set("")
 
         self.flash_button.configure(state="normal" if self.ports else "disabled")
+        self.sd_files_button.configure(state="normal" if self.ports else "disabled")
         if not self.ports:
             self.status_var.set("No serial device detected — connect the device and refresh")
         elif not self.raw_output:
@@ -874,8 +1421,506 @@ class FlasherApp:
         entry = self.port_by_label.get(self.port_var.get())
         return entry.device if entry else None
 
+    def open_sd_files(self, refresh: bool = True) -> None:
+        if self.flashing or self.sd_busy:
+            return
+        if not self.selected_port():
+            messagebox.showerror(APP_NAME, "Select a serial device before browsing SD files.")
+            return
+        if self.sd_window is not None and self.sd_window.winfo_exists():
+            self.sd_window.lift()
+            self.sd_window.focus_force()
+            return
+
+        window = tk.Toplevel(self.root)
+        self.sd_window = window
+        window.title(f"{APP_NAME} — SD Files")
+        screen_width = window.winfo_screenwidth()
+        screen_height = window.winfo_screenheight()
+        width = min(SD_WINDOW_WIDTH, max(760, screen_width - 40))
+        height = min(SD_WINDOW_HEIGHT, max(560, screen_height - 60))
+        window.geometry(f"{width}x{height}")
+        window.minsize(
+            min(SD_WINDOW_MIN_WIDTH, width),
+            min(SD_WINDOW_MIN_HEIGHT, height),
+        )
+        window.configure(background=self.BACKGROUND)
+        window.transient(self.root)
+        window.protocol("WM_DELETE_WINDOW", self._close_sd_files)
+
+        outer = ttk.Frame(window, style="App.TFrame", padding=(22, 20))
+        outer.pack(fill="both", expand=True)
+        outer.columnconfigure(0, weight=1)
+        outer.rowconfigure(4, weight=1, minsize=120)
+        self._label(outer, "SD FILES", 11, self.ACCENT, "bold").grid(
+            row=0, column=0, sticky="w"
+        )
+        self._label(
+            outer,
+            "Copy SD files or install Evil Portal HTML templates over USB serial.",
+            14,
+            self.TEXT,
+            "bold",
+        ).grid(row=1, column=0, sticky="w", pady=(3, 2))
+        self.sd_description_label = self._label(
+            outer,
+            "Opening this window puts the device in locked USB SD mode. Downloaded files are "
+            "SHA-256 verified; some files may contain sensitive credentials.",
+            9,
+            self.MUTED,
+            wraplength=max(600, width - 60),
+            justify="left",
+        )
+        self.sd_description_label.grid(
+            row=2, column=0, sticky="ew", pady=(0, 14)
+        )
+        window.bind(
+            "<Configure>",
+            lambda event: self.sd_description_label.configure(
+                wraplength=max(500, event.width - 60)
+            ) if event.widget is window else None,
+        )
+
+        self.sd_activity_label = self._label(
+            outer,
+            textvariable=self.sd_activity_var,
+            size=13,
+            color=self.BRIGHT_ERROR,
+            weight="bold",
+            anchor="w",
+        )
+        self.sd_activity_label.grid(
+            row=3, column=0, sticky="ew", pady=(0, 12)
+        )
+
+        tree_frame = tk.Frame(
+            outer, background=self.PANEL, highlightthickness=1,
+            highlightbackground="#283541",
+        )
+        tree_frame.grid(row=4, column=0, sticky="nsew")
+        tree_frame.rowconfigure(0, weight=1)
+        tree_frame.columnconfigure(0, weight=1)
+        self.sd_tree = ttk.Treeview(
+            tree_frame,
+            columns=("size", "modified"),
+            show="tree headings",
+            selectmode="extended",
+            style="Sd.Treeview",
+        )
+        self.sd_tree.heading("#0", text="SD path", anchor="w")
+        self.sd_tree.heading("size", text="Size", anchor="e")
+        self.sd_tree.heading("modified", text="Modified", anchor="w")
+        self.sd_tree.column("#0", width=690, minwidth=360, stretch=True)
+        self.sd_tree.column("size", width=110, minwidth=90, stretch=False, anchor="e")
+        self.sd_tree.column("modified", width=170, minwidth=155, stretch=False)
+        tree_scroll_y = ttk.Scrollbar(
+            tree_frame, orient="vertical", command=self.sd_tree.yview
+        )
+        tree_scroll_x = ttk.Scrollbar(
+            tree_frame, orient="horizontal", command=self.sd_tree.xview
+        )
+        self.sd_tree.configure(
+            yscrollcommand=tree_scroll_y.set,
+            xscrollcommand=tree_scroll_x.set,
+        )
+        self.sd_tree.grid(row=0, column=0, sticky="nsew")
+        tree_scroll_y.grid(row=0, column=1, sticky="ns")
+        tree_scroll_x.grid(row=1, column=0, sticky="ew")
+        self.sd_tree.bind("<Double-1>", lambda _event: self.download_selected_sd_files())
+
+        progress_row = ttk.Frame(outer, style="App.TFrame")
+        progress_row.grid(row=5, column=0, sticky="ew", pady=(13, 5))
+        self._label(
+            progress_row, textvariable=self.sd_status_var,
+            size=9, color=self.MUTED, weight="bold",
+        ).pack(side="left")
+        self._label(
+            progress_row, textvariable=self.sd_progress_text_var,
+            size=9, color=self.TEXT, weight="bold",
+        ).pack(side="right")
+        self.sd_progress = ttk.Progressbar(
+            outer,
+            variable=self.sd_progress_var,
+            maximum=100,
+            style="Flash.Horizontal.TProgressbar",
+        )
+        self.sd_progress.grid(row=6, column=0, sticky="ew", pady=(0, 12))
+
+        button_row = ttk.Frame(outer, style="App.TFrame")
+        button_row.grid(row=7, column=0, sticky="ew")
+        self.sd_refresh_button = tk.Button(
+            button_row, text="Refresh", command=self.refresh_sd_files,
+            background=self.PANEL_ALT, foreground=self.TEXT,
+            activebackground="#2a3744", activeforeground=self.TEXT,
+            relief="flat", padx=14, pady=9, cursor="hand2",
+        )
+        self.sd_refresh_button.pack(side="left")
+        self.sd_upload_button = tk.Button(
+            button_row, text="Upload Evil Portal HTML",
+            command=self.upload_evil_portal_html,
+            background=self.PANEL_ALT, foreground=self.TEXT,
+            activebackground="#2a3744", activeforeground=self.TEXT,
+            disabledforeground="#7c8491", relief="flat",
+            padx=14, pady=9, cursor="hand2",
+        )
+        self.sd_upload_button.pack(side="left", padx=(8, 0))
+        self.sd_download_selected_button = tk.Button(
+            button_row, text="Download Selected",
+            command=self.download_selected_sd_files,
+            background=self.ACCENT, foreground="white",
+            activebackground=self.ACCENT_ACTIVE, activeforeground="white",
+            disabledforeground="#7c8491", relief="flat",
+            padx=16, pady=9, cursor="hand2",
+        )
+        self.sd_download_selected_button.pack(side="right")
+        self.sd_download_all_button = tk.Button(
+            button_row, text="Download All", command=self.download_all_sd_files,
+            background=self.PANEL_ALT, foreground=self.TEXT,
+            activebackground="#2a3744", activeforeground=self.TEXT,
+            disabledforeground="#7c8491", relief="flat",
+            padx=14, pady=9, cursor="hand2",
+        )
+        self.sd_download_all_button.pack(side="right", padx=(0, 8))
+        self._set_sd_controls(False)
+        if refresh:
+            self.refresh_sd_files()
+
+    def _close_sd_files(self) -> None:
+        if self.sd_busy:
+            messagebox.showwarning(
+                APP_NAME,
+                "An SD operation is still in progress. Wait for it to finish before closing this window.",
+                parent=self.sd_window,
+            )
+            return
+        if self.sd_client is not None:
+            self.sd_activity_var.set(SD_MODE_CLOSING_TEXT)
+            self.sd_status_var.set("Closing USB SD mode and returning the device to normal…")
+            self._set_sd_controls(True)
+            threading.Thread(target=self._sd_close_worker, daemon=True).start()
+            return
+        self._destroy_sd_window()
+
+    def _destroy_sd_window(self) -> None:
+        if self.sd_window is not None and self.sd_window.winfo_exists():
+            self.sd_window.destroy()
+        self.sd_window = None
+        self.sd_entries = []
+        self.sd_entry_by_item.clear()
+        self.sd_activity_var.set("")
+        self._set_sd_controls(False)
+
+    def _sd_close_worker(self) -> None:
+        client = self.sd_client
+        self.sd_client = None
+        try:
+            if client is not None:
+                client.set_session(False)
+        except Exception:
+            # The port may disappear while closing. Closing it still releases
+            # the desktop side; a device reset always exits transfer mode.
+            pass
+        finally:
+            if client is not None:
+                client.close()
+        self.events.put(("sd_closed", None))
+
+    def _sd_client_for(self, port: str, upload: bool = False) -> SdSerialClient:
+        if self.sd_client is not None:
+            if self.sd_client.port != port:
+                raise SdProtocolError(
+                    "The selected serial device changed while SD Files was open."
+                )
+            if upload:
+                self.sd_client.protocol_info(
+                    SD_REQUIRED_CAPABILITIES |
+                    frozenset((SD_UPLOAD_CAPABILITY,))
+                )
+            self.sd_client.set_session(True)
+            return self.sd_client
+
+        required = SD_REQUIRED_CAPABILITIES
+        if upload:
+            required |= frozenset((SD_UPLOAD_CAPABILITY,))
+        client = SdSerialClient(port)
+        try:
+            client.__enter__()
+            client.protocol_info(required)
+            client.set_session(True)
+        except Exception:
+            client.close()
+            raise
+        self.sd_client = client
+        return client
+
+    def _set_sd_controls(self, active: bool) -> None:
+        self.sd_busy = active
+        session_open = self.sd_window is not None and self.sd_window.winfo_exists()
+        main_locked = active or session_open
+        main_state = "disabled" if main_locked else "normal"
+        self.port_combo.configure(state="disabled" if main_locked else "readonly")
+        self.firmware_entry.configure(state="disabled" if main_locked else "readonly")
+        self.refresh_button.configure(state=main_state)
+        self.browse_button.configure(state=main_state)
+        self.included_button.configure(state=main_state)
+        self.flash_button.configure(
+            state=main_state if self.ports else "disabled"
+        )
+        self.sd_files_button.configure(
+            state=main_state if self.ports else "disabled"
+        )
+        if self.sd_window is not None and self.sd_window.winfo_exists():
+            sd_state = "disabled" if active else "normal"
+            self.sd_refresh_button.configure(state=sd_state)
+            self.sd_upload_button.configure(state=sd_state)
+            have_files = bool(self.sd_entries) and not active
+            download_state = "normal" if have_files else "disabled"
+            self.sd_download_selected_button.configure(state=download_state)
+            self.sd_download_all_button.configure(state=download_state)
+
+    def refresh_sd_files(self) -> None:
+        if self.flashing or self.sd_busy:
+            return
+        port = self.selected_port()
+        if not port:
+            messagebox.showerror(APP_NAME, "Select a serial device first.", parent=self.sd_window)
+            return
+        self.sd_activity_var.set(SD_FILES_LOADING_TEXT)
+        self.sd_status_var.set("Connecting and reading the SD file list…")
+        self.sd_progress_text_var.set("")
+        self.sd_progress_var.set(0)
+        self._set_sd_controls(True)
+        threading.Thread(
+            target=self._sd_list_worker, args=(port,), daemon=True
+        ).start()
+
+    def _sd_list_worker(self, port: str) -> None:
+        try:
+            client = self._sd_client_for(port)
+            entries = client.list_files()
+            self.events.put(("sd_list_done", entries))
+        except Exception as error:
+            self.events.put(("sd_error", friendly_sd_failure(error)))
+
+    def _show_sd_entries(self, entries: list[SdFileEntry]) -> None:
+        if self.sd_window is None or not self.sd_window.winfo_exists():
+            return
+        self.sd_tree.delete(*self.sd_tree.get_children())
+        self.sd_entry_by_item.clear()
+        self.sd_entries = entries
+        for entry in entries:
+            item = self.sd_tree.insert(
+                "", "end", text=entry.path,
+                values=(format_file_size(entry.size), format_modified(entry.modified)),
+            )
+            self.sd_entry_by_item[item] = entry
+        total = sum(entry.size for entry in entries)
+        self.sd_status_var.set(
+            f"{len(entries)} file{'s' if len(entries) != 1 else ''} — {format_file_size(total)} total"
+        )
+        self.sd_activity_var.set("")
+        self.sd_progress_var.set(0)
+        self.sd_progress_text_var.set("")
+        self._set_sd_controls(False)
+
+    def _selected_sd_entries(self) -> list[SdFileEntry]:
+        if self.sd_window is None or not self.sd_window.winfo_exists():
+            return []
+        return [
+            self.sd_entry_by_item[item]
+            for item in self.sd_tree.selection()
+            if item in self.sd_entry_by_item
+        ]
+
+    def download_selected_sd_files(self) -> None:
+        entries = self._selected_sd_entries()
+        if not entries:
+            messagebox.showinfo(
+                APP_NAME, "Select one or more files to download.", parent=self.sd_window
+            )
+            return
+        self._choose_sd_destinations(entries, force_directory=False)
+
+    def download_all_sd_files(self) -> None:
+        if not self.sd_entries:
+            messagebox.showinfo(APP_NAME, "The SD card has no files to download.", parent=self.sd_window)
+            return
+        self._choose_sd_destinations(self.sd_entries, force_directory=True)
+
+    def upload_evil_portal_html(self) -> None:
+        if self.flashing or self.sd_busy:
+            return
+        selected = filedialog.askopenfilename(
+            parent=self.sd_window,
+            title="Choose an Evil Portal HTML template",
+            filetypes=(("HTML files", "*.html *.HTML"), ("All files", "*.*")),
+        )
+        if not selected:
+            return
+
+        source = Path(selected)
+        try:
+            destination = evil_portal_upload_path(source)
+            size = source.stat().st_size
+            if size <= 0 or size >= EVIL_PORTAL_MAX_HTML_BYTES:
+                raise SdProtocolError(
+                    "The Evil Portal template must be non-empty and smaller than 30,000 bytes.",
+                    "INVALID_SIZE",
+                )
+        except (OSError, SdProtocolError) as error:
+            messagebox.showerror(
+                APP_NAME, friendly_sd_failure(error), parent=self.sd_window
+            )
+            return
+
+        existing = next(
+            (entry for entry in self.sd_entries
+             if entry.path.casefold() == destination.casefold()),
+            None,
+        )
+        overwrite = existing is not None
+        if overwrite and not messagebox.askyesno(
+            APP_NAME,
+            f"{destination} already exists on the SD card. Replace it only after "
+            "the new file passes SHA-256 verification?",
+            icon="warning",
+            parent=self.sd_window,
+        ):
+            return
+
+        port = self.selected_port()
+        if not port:
+            messagebox.showerror(
+                APP_NAME, "The selected device is no longer available.",
+                parent=self.sd_window,
+            )
+            return
+        self.sd_progress_var.set(0)
+        self.sd_progress_text_var.set("0%")
+        self.sd_activity_var.set(SD_FILE_UPLOADING_TEXT)
+        self.sd_status_var.set(f"Preparing {destination}…")
+        self._set_sd_controls(True)
+        threading.Thread(
+            target=self._sd_upload_worker,
+            args=(port, source, overwrite),
+            daemon=True,
+        ).start()
+
+    def _sd_upload_worker(
+        self, port: str, source: Path, overwrite: bool
+    ) -> None:
+        try:
+            client = self._sd_client_for(port, upload=True)
+
+            def report(current: int, total: int) -> None:
+                percent = min(100.0, current * 100.0 / max(total, 1))
+                self.events.put((
+                    "sd_progress",
+                    (percent, f"Uploading {source.name}"),
+                ))
+
+            entry = client.upload_evil_portal_html(
+                source, overwrite=overwrite, progress=report
+            )
+            entries = client.list_files()
+            self.events.put(("sd_upload_done", (entry, entries)))
+        except Exception as error:
+            self.events.put(("sd_error", friendly_sd_failure(error)))
+
+    def _choose_sd_destinations(
+        self, entries: list[SdFileEntry], force_directory: bool
+    ) -> None:
+        if self.flashing or self.sd_busy:
+            return
+        default_directory = Path.home() / "Downloads"
+        if not default_directory.is_dir():
+            default_directory = Path.home()
+
+        targets: list[tuple[SdFileEntry, Path]] = []
+        if len(entries) == 1 and not force_directory:
+            selected = filedialog.asksaveasfilename(
+                parent=self.sd_window,
+                title="Save SD file",
+                initialdir=str(default_directory),
+                initialfile=entries[0].name,
+                confirmoverwrite=True,
+            )
+            if not selected:
+                return
+            targets.append((entries[0], Path(selected)))
+        else:
+            selected = filedialog.askdirectory(
+                parent=self.sd_window,
+                title="Choose a folder for the SD files",
+                initialdir=str(default_directory),
+                mustexist=True,
+            )
+            if not selected:
+                return
+            destination = Path(selected)
+            try:
+                targets = [
+                    (entry, local_path_for_sd(destination, entry.path))
+                    for entry in entries
+                ]
+            except SdProtocolError as error:
+                messagebox.showerror(APP_NAME, friendly_sd_failure(error), parent=self.sd_window)
+                return
+            existing = sum(target.exists() for _entry, target in targets)
+            if existing and not messagebox.askyesno(
+                APP_NAME,
+                f"{existing} local file{'s' if existing != 1 else ''} already exist. "
+                "Replace them after each download is verified?",
+                icon="warning",
+                parent=self.sd_window,
+            ):
+                return
+
+        port = self.selected_port()
+        if not port:
+            messagebox.showerror(APP_NAME, "The selected device is no longer available.", parent=self.sd_window)
+            return
+        self.sd_progress_var.set(0)
+        self.sd_progress_text_var.set("0%")
+        self.sd_activity_var.set(SD_FILES_DOWNLOADING_TEXT)
+        self.sd_status_var.set("Starting verified SD download…")
+        self._set_sd_controls(True)
+        threading.Thread(
+            target=self._sd_download_worker,
+            args=(port, targets),
+            daemon=True,
+        ).start()
+
+    def _sd_download_worker(
+        self, port: str, targets: list[tuple[SdFileEntry, Path]]
+    ) -> None:
+        total_bytes = sum(entry.size for entry, _destination in targets)
+        completed_bytes = 0
+        try:
+            client = self._sd_client_for(port)
+            for index, (entry, destination) in enumerate(targets, start=1):
+                base_bytes = completed_bytes
+
+                def report(current: int, actual_total: int,
+                           entry_path: str = entry.path,
+                           item_index: int = index) -> None:
+                    denominator = max(total_bytes - entry.size + actual_total, 1)
+                    current_total = base_bytes + current
+                    percent = min(100.0, current_total * 100.0 / denominator)
+                    self.events.put((
+                        "sd_progress",
+                        (percent, f"{item_index}/{len(targets)}  {entry_path}"),
+                    ))
+
+                client.download_file(entry, destination, report)
+                completed_bytes += entry.size
+            self.events.put(("sd_download_done", (len(targets), targets[-1][1])))
+        except Exception as error:
+            self.events.put(("sd_error", friendly_sd_failure(error)))
+
     def _automatic_refresh(self) -> None:
-        if not self.flashing:
+        if (not self.flashing and not self.sd_busy and
+                (self.sd_window is None or not self.sd_window.winfo_exists())):
             self.refresh_ports()
         self.root.after(1800, self._automatic_refresh)
 
@@ -904,9 +1949,10 @@ class FlasherApp:
         self.browse_button.configure(state=state)
         self.included_button.configure(state=state)
         self.flash_button.configure(state=state if self.ports else "disabled")
+        self.sd_files_button.configure(state=state if self.ports else "disabled")
 
     def start_flash(self) -> None:
-        if self.flashing:
+        if self.flashing or self.sd_busy:
             return
         port = self.selected_port()
         if not port:
@@ -1021,6 +2067,60 @@ class FlasherApp:
                 elif kind == "done":
                     success, message = payload  # type: ignore[misc]
                     self._finish(bool(success), str(message))
+                elif kind == "sd_list_done":
+                    self._show_sd_entries(list(payload))  # type: ignore[arg-type]
+                elif kind == "sd_progress":
+                    percent, label = payload  # type: ignore[misc]
+                    self.sd_progress_var.set(float(percent))
+                    self.sd_progress_text_var.set(f"{int(round(float(percent)))}%")
+                    self.sd_status_var.set(str(label))
+                elif kind == "sd_download_done":
+                    count, final_path = payload  # type: ignore[misc]
+                    self.sd_progress_var.set(100)
+                    self.sd_progress_text_var.set("100%")
+                    self.sd_status_var.set(
+                        f"Downloaded and verified {int(count)} file{'s' if int(count) != 1 else ''}"
+                    )
+                    self.sd_activity_var.set("")
+                    self._set_sd_controls(False)
+                    messagebox.showinfo(
+                        APP_NAME,
+                        f"Downloaded and SHA-256 verified {int(count)} SD file"
+                        f"{'s' if int(count) != 1 else ''}.\n\nLast file: {final_path}",
+                        parent=self.sd_window,
+                    )
+                elif kind == "sd_upload_done":
+                    entry, entries = payload  # type: ignore[misc]
+                    self._show_sd_entries(list(entries))
+                    self.sd_progress_var.set(100)
+                    self.sd_progress_text_var.set("100%")
+                    self.sd_status_var.set(
+                        f"Uploaded and verified {entry.path}"
+                    )
+                    for item, listed_entry in self.sd_entry_by_item.items():
+                        if listed_entry.path == entry.path:
+                            self.sd_tree.selection_set(item)
+                            self.sd_tree.see(item)
+                            break
+                    messagebox.showinfo(
+                        APP_NAME,
+                        f"Uploaded and SHA-256 verified:\n\n{entry.path}\n\n"
+                        "It is now available in Select EP HTML File on the device.",
+                        parent=self.sd_window,
+                    )
+                elif kind == "sd_error":
+                    self.sd_progress_var.set(0)
+                    self.sd_progress_text_var.set("")
+                    self.sd_activity_var.set("SD Card Operation Failed.")
+                    self.sd_status_var.set("SD operation failed")
+                    self._set_sd_controls(False)
+                    messagebox.showerror(APP_NAME, str(payload), parent=self.sd_window)
+                elif kind == "sd_closed":
+                    self._set_sd_controls(False)
+                    self._destroy_sd_window()
+                    if self.quit_after_sd_close:
+                        self.root.destroy()
+                        return
         except queue.Empty:
             pass
         self.root.after(100, self._drain_events)
@@ -1041,12 +2141,18 @@ class FlasherApp:
             messagebox.showerror(APP_NAME, message)
 
     def _on_close(self) -> None:
-        if self.flashing:
+        if self.flashing or self.sd_busy:
             messagebox.showwarning(
                 APP_NAME,
-                "Flashing is still in progress. Wait for success or failure before closing the app.",
+                "A device operation is still in progress. Wait for it to finish before closing the app.",
             )
             return
+        if self.sd_window is not None and self.sd_window.winfo_exists():
+            if self.sd_client is not None:
+                self.quit_after_sd_close = True
+                self._close_sd_files()
+                return
+            self._destroy_sd_window()
         self.root.destroy()
 
 
@@ -1084,6 +2190,35 @@ def ui_smoke_test() -> int:
         raise RuntimeError(
             f"Activity log shows only {visible_lines} lines; at least {MIN_ACTIVITY_LINES} are required."
         )
+    if not app.sd_files_button.winfo_exists():
+        root.destroy()
+        raise RuntimeError("The SD Files control was not created.")
+    smoke_port = PortEntry("SMOKE", "Test serial device", "")
+    app.ports = [smoke_port]
+    app.port_by_label = {smoke_port.label: smoke_port}
+    app.port_var.set(smoke_port.label)
+    app.open_sd_files(refresh=False)
+    root.update()
+    if app.sd_window is None or not app.sd_tree.winfo_exists():
+        root.destroy()
+        raise RuntimeError("The SD Files browser did not render.")
+    if not app.sd_upload_button.winfo_exists():
+        root.destroy()
+        raise RuntimeError("The Evil Portal HTML upload control did not render.")
+    if not app.sd_activity_label.winfo_exists():
+        root.destroy()
+        raise RuntimeError("The SD operation activity message did not render.")
+    window_bottom = app.sd_window.winfo_rooty() + app.sd_window.winfo_height()
+    for control in (
+        app.sd_refresh_button,
+        app.sd_upload_button,
+        app.sd_download_all_button,
+        app.sd_download_selected_button,
+    ):
+        if control.winfo_rooty() + control.winfo_height() > window_bottom:
+            root.destroy()
+            raise RuntimeError(f"The SD control {control.cget('text')} is clipped.")
+    app._close_sd_files()
     root.destroy()
     print(f"UI SMOKE TEST PASSED ({visible_lines} activity lines visible)")
     return 0

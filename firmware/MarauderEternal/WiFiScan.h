@@ -51,6 +51,7 @@
   #include "SDInterface.h"
 #endif
 #include "Buffer.h"
+#include "StoragePaths.h"
 #ifdef HAS_BATTERY
   #include "BatteryInterface.h"
 #endif
@@ -181,7 +182,8 @@
 // PineScan and Multi SSID
 #define MULTISSID_THRESHOLD 3 // Threshold For Multi SSID
 #define MAX_MULTISSID_ENTRIES 100 // Max number of confirmed MultiSSIDs to store
-#define MAX_AP_ENTRIES 100 // Max number of APs to track for analysis
+#define MAX_ANALYZER_AP_ENTRIES 100 // Bound temporary PineScan/MultiSSID trackers
+#define MAX_AP_ENTRIES 256 // Max BSSIDs retained by AP/SSID scans and selectors
 #define MAX_DISPLAY_ENTRIES 1 // Max Unique MACs to display
 #define MAX_PINESCAN_ENTRIES 100 // PineScan Max Entries
 
@@ -339,6 +341,7 @@ class WiFiScan
     int current_act_len = 0;
 
     uint32_t chanActTime = 0;
+    bool scan_start_failed = false;
 
     uint8_t ap_mac[6] = {0xDE, 0xAD, 0xBE, 0xEF, 0xFE, 0xED};
     uint8_t sta_mac[6] = {0xDE, 0xAD, 0xBE, 0xEF, 0xFE, 0xED};
@@ -440,8 +443,34 @@ class WiFiScan
     void resetSSIDFinder();
     int8_t ssidFinderRssi(int16_t finder_index) const;
     uint32_t ssidFinderFreshWindowMs() const;
+    struct ActiveSnifferDeauthTarget {
+      uint8_t bssid[6] = {};
+      uint8_t channel = 1;
+    };
+    std::vector<ActiveSnifferDeauthTarget> active_sniffer_deauth_targets;
+    uint16_t active_sniffer_deauth_cursor = 0;
+    uint32_t active_sniffer_deauth_next_ms = 0;
+    bool active_sniffer_deauth_requested = false;
+    const char* active_sniffer_deauth_label = "Deauth";
+    void prepareActiveSnifferDeauth(bool requested, const char* label);
+    void runActiveSnifferDeauth(uint32_t current_time);
+    void resetActiveSnifferDeauth();
     uint8_t bluetoothScanTime = 5;
     int packets_sent = 0;
+    uint16_t deauth_ap_cursor = 0;
+    uint16_t deauth_station_cursor = 0;
+    uint16_t evil_portal_deauth_cursor = 0;
+    uint32_t deauth_next_tx_ms = 0;
+    uint32_t evil_portal_deauth_next_ms = 0;
+    uint32_t deauth_tx_attempts = 0;
+    uint32_t deauth_tx_accepted = 0;
+    uint32_t deauth_tx_failures = 0;
+    uint32_t deauth_last_error_ms = 0;
+    uint32_t deauth_next_ui_ms = 0;
+    int16_t deauth_active_ap_index = -1;
+    int16_t deauth_active_station_index = -1;
+    uint16_t evil_portal_scroll_offset = 0;
+    uint32_t evil_portal_next_ui_ms = 0;
     const wifi_promiscuous_filter_t filt = {.filter_mask=WIFI_PROMIS_FILTER_MASK_MGMT | WIFI_PROMIS_FILTER_MASK_DATA};
     #ifdef HAS_BT
       NimBLEScan* pBLEScan;
@@ -725,10 +754,16 @@ class WiFiScan
     void runFoxHunt(uint32_t currentTime);
     void throwThatShitInACircle();
     void displayTargetFilter(uint8_t scan_mode);
+    void drawDeauthStatus(uint8_t scan_mode);
+    void drawEvilPortalStatus();
+    uint16_t evilPortalStatusLineCount() const;
     void displayTransmitRate();
     void prepareScanStage(uint16_t color_1, uint16_t color_2);
     void setLEDMode(int mode);
-    void setWiFiMode(wifi_mode_t mode, wifi_promiscuous_cb_t cb);
+    bool setWiFiMode(wifi_mode_t mode, wifi_promiscuous_cb_t cb);
+    bool startSnifferWiFi(const wifi_init_config_t& init_config,
+                          wifi_mode_t mode, wifi_promiscuous_cb_t callback,
+                          bool configure_hidden_ap, const char* owner);
     void writeNetworkInfo();
     void setupScanDisplayArea(uint16_t background, uint16_t color);
     void updateTrackerUI();
@@ -761,7 +796,8 @@ class WiFiScan
     void saeAttackLoop(uint32_t currentTime);
     void processPwnagotchiBeacon(const uint8_t* frame, int length);
 
-    void startWiFiAttacks(uint8_t scan_mode, uint16_t color, const char* title_string);
+    bool startWiFiAttacks(uint8_t scan_mode, uint16_t color,
+                          const char* title_string);
 
     void signalAnalyzerLoop(uint32_t tick);
     void channelActivityLoop(uint32_t tick);
@@ -772,7 +808,11 @@ class WiFiScan
     void sendProbeAttack(uint32_t currentTime);
     void sendBadMsgAttack(uint32_t currentTime, bool all = false);
     void sendAssocSleepAttack(uint32_t currentTime, bool all = false);
-    void sendDeauthFrame(uint8_t bssid[6], int channel, uint8_t mac[6]);
+    uint8_t sendDeauthFrame(const uint8_t bssid[6], int channel,
+                            const uint8_t mac[6]);
+    bool sendNextSelectedAPDeauth(const uint8_t destination[6],
+                                  uint16_t& cursor);
+    bool sendNextSelectedStationDeauth();
     void sendCameraDeauthFrame(WiFiCameraDetector::DeauthLink& link);
     void drawCameraDeauthStatus();
     void sendEapolBagMsg1(uint8_t bssid[6], int channel, uint8_t mac[6], uint8_t sec = WIFI_SECURITY_WPA2);
@@ -798,13 +838,13 @@ class WiFiScan
     void RunDeauthScan(uint8_t scan_mode, uint16_t color);
     void RunEapolScan(uint8_t scan_mode, uint16_t color);
     void RunProbeScan(uint8_t scan_mode, uint16_t color);
-    void RunSAEScan(uint8_t scan_mode, uint16_t color);
+    bool RunSAEScan(uint8_t scan_mode, uint16_t color);
     void RunPacketMonitor(uint8_t scan_mode, uint16_t color);
     void RunBluetoothScan(uint8_t scan_mode, uint16_t color);
     void RunSourApple(uint8_t scan_mode, uint16_t color);
     void RunFindMyLive(uint8_t scan_mode, uint16_t color);
     void RunSwiftpairSpam(uint8_t scan_mode, uint16_t color);
-    void RunEvilPortal(uint8_t scan_mode, uint16_t color);
+    bool RunEvilPortal(uint8_t scan_mode, uint16_t color);
     void RunPingScan(uint8_t scan_mode, uint16_t color);
     void RunPortScanAll(uint8_t scan_mode, uint16_t color);
     bool checkMem();
@@ -815,6 +855,7 @@ class WiFiScan
 
 
   public:
+    bool validDeauthChannel(int channel) const;
     volatile bool bt_cb_busy = false;
     volatile bool bt_pending_clear = false;
     bool ble_advert_capture = false;
@@ -903,8 +944,11 @@ class WiFiScan
 
     bool orient_display = false;
     bool wifi_initialized = false;
+    bool deauth_tx_ready = false;
     bool ble_initialized = false;
     bool wifi_connected = false;
+    bool wifi_event_registered = false;
+    uint32_t wifi_process_start_heap = 0;
 
     String free_ram = "";
     String old_free_ram = "";
@@ -983,6 +1027,7 @@ class WiFiScan
     bool uploadFile(String filePath, bool retry = false, uint8_t upload_type = WIGLE_UPLOAD);
     String checkEmptyProbe(String essid);
     bool startWiFi(String ssid, String password, bool gui = true);
+    void resetStandaloneWiFiState();
     int seenBLEDevice(BleDevice ble_device);
     uint16_t rssiToColor(int8_t rssi);
     bool isMetaIdentifier(uint16_t id);
@@ -1020,7 +1065,7 @@ class WiFiScan
                  bool save_now = true);
     bool removeSSID(int index);
     int generateSSIDs(int count = 20);
-    bool shutdownWiFi();
+    bool shutdownWiFi(bool force = false);
     bool shutdownBLE();
     bool startBLEAdvertisementCapture();
     #ifdef HAS_NIMBLE_2
@@ -1063,15 +1108,20 @@ class WiFiScan
 
     bool save_serial = false;
     void startPcap(const char* file_name);
-    void startLog(const char* file_name);
-    void startGPX(const char* file_name);
+    void startLog(const char* file_name,
+                  const char* directory = "/logs");
+    void startGPX(const char* file_name,
+                  const char* directory = "/gps");
 
     static WiFiEventId_t eventId;
     static String lastClientMAC;
     static String lastClientIP;
 
     static void onWiFiEvent(WiFiEvent_t event, WiFiEventInfo_t info);
+    bool initializeRawWiFiDriver(const wifi_init_config_t& config,
+                                 const char* operation);
     static bool initMbedtls();
+    static void freeMbedtls();
     static int mbedtls_entropy_source(void *data, unsigned char *output, size_t len);
     static bool getSAEACT(const uint8_t *frame, size_t frame_len, uint16_t &group_out, size_t &act_len_out);
     static bool sae_group_sizes(uint16_t group, size_t &scalar_len, size_t &element_len);

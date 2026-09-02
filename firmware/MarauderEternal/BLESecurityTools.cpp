@@ -226,7 +226,8 @@ bool openGattServiceLog(File& logFile, String& logPath) {
   String addressToken = targetAddress();
   addressToken.toUpperCase();
   addressToken.replace(':', '-');
-  const String basePath = String(F("/BLE_GATT_ADV_")) +
+  const String basePath = String(marauder::storage::LOGS_DIR) +
+                          F("/BLE_GATT_ADV_") +
                           filenameToken(targetVendorName(), 28) + "_" + addressToken;
   for (uint16_t index = 0; index < 10000; index++) {
     logPath = basePath;
@@ -391,34 +392,41 @@ void loadAdvertisementVariants(std::vector<AdvertisementVariant>& variants,
   if (!sd_obj.supported)
     return;
 
-  File root = SD.open("/");
-  if (!root)
-    return;
-  while (true) {
-    File entry = root.openNextFile();
-    if (!entry)
-      break;
-    String fileName = entry.name();
-    const int slash = fileName.lastIndexOf('/');
-    if (slash >= 0)
-      fileName = fileName.substring(slash + 1);
-    if (entry.isDirectory() || !fileName.startsWith("ble_advertisements_") || !fileName.endsWith(".log")) {
-      entry.close();
-      continue;
+  const auto loadCaptureDirectory = [&](const char* directory) {
+    File root = SD.open(directory);
+    if (!root || !root.isDirectory()) {
+      if (root)
+        root.close();
+      return;
     }
+    while (!memoryLimited) {
+      File entry = root.openNextFile();
+      if (!entry)
+        break;
+      const String fileName = marauder::storage::baseName(entry.name());
+      if (entry.isDirectory() ||
+          !fileName.startsWith("ble_advertisements_") ||
+          !fileName.endsWith(".log")) {
+        entry.close();
+        continue;
+      }
 
-    captureFilesRead++;
-    while (entry.available() && !memoryLimited) {
-      const String line = entry.readStringUntil('\n');
-      AdvertisementVariant captured{};
-      if (parseCaptureVariant(line, targetAddress(), captured, unsupportedLength))
-        addUniqueVariant(variants, captured, memoryLimited);
+      captureFilesRead++;
+      while (entry.available() && !memoryLimited) {
+        const String line = entry.readStringUntil('\n');
+        AdvertisementVariant captured{};
+        if (parseCaptureVariant(line, targetAddress(), captured,
+                                unsupportedLength))
+          addUniqueVariant(variants, captured, memoryLimited);
+      }
+      entry.close();
     }
-    entry.close();
-    if (memoryLimited)
-      break;
-  }
-  root.close();
+    root.close();
+  };
+
+  loadCaptureDirectory(marauder::storage::LOGS_DIR);
+  // Cards written by older releases kept BLE captures in the root.
+  loadCaptureDirectory("/");
 #endif
 }
 

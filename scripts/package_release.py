@@ -17,6 +17,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 RELEASE_DIR = PROJECT_ROOT / "release"
 CONFIG_PATH = PROJECT_ROOT / "firmware" / "MarauderEternal" / "configs.h"
 CORE_VERSION = "3.3.4"
+FLASHER_VERSION = "1.3.5"
 HARDWARE = "Marauder Mini V3"
 METADATA_HARDWARE = "Marauder Eternal Mini V3"
 CHIP = "ESP32-C5"
@@ -103,6 +104,8 @@ def verify_release() -> None:
         raise RuntimeError("Manifest partition layout is missing or incorrect")
     if manifest.get("application_flash_offsets") != ["0x10000", "0x400000"]:
         raise RuntimeError("Manifest does not require both OTA application slots")
+    if manifest.get("flasher_version") != FLASHER_VERSION:
+        raise RuntimeError("Manifest flasher version is missing or incorrect")
 
     records = [manifest["full_device_image"], *manifest["images"]]
     for record in records:
@@ -203,7 +206,7 @@ def package_release(build_dir: Path) -> None:
     manifest = {
         "product": "ESP32 Marauder Eternal",
         "version": version,
-        "flasher_version": "1.2.0",
+        "flasher_version": FLASHER_VERSION,
         "hardware": HARDWARE,
         "chip": CHIP,
         "flash_size": "8MB",

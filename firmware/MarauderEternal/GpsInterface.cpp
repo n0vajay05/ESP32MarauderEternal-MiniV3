@@ -1,8 +1,10 @@
 #include "GpsInterface.h"
+#include "DeviceClock.h"
 
 #ifdef HAS_GPS
 
 extern GpsInterface gps_obj;
+extern DeviceClock device_clock_obj;
 
 char nmeaBuffer[100];
 
@@ -418,6 +420,18 @@ void GpsInterface::setGPSInfo() {
   this->num_sats = nmea.getNumSatellites();
 
   this->datetime = this->dt_string_from_gps();
+
+  if (nmea.isValid() && nmea.getYear() >= 2020) {
+    const marauder::clock::UtcDateTime gps_time = {
+        static_cast<uint16_t>(nmea.getYear()),
+        static_cast<uint8_t>(nmea.getMonth()),
+        static_cast<uint8_t>(nmea.getDay()),
+        static_cast<uint8_t>(nmea.getHour()),
+        static_cast<uint8_t>(nmea.getMinute()),
+        static_cast<uint8_t>(nmea.getSecond()),
+    };
+    device_clock_obj.syncFromGps(gps_time);
+  }
 
   const uint8_t hdop = nmea.getHDOP();
   this->accuracy = hdop == 255 ? 0.0f : 2.5f * (static_cast<float>(hdop) / 10.0f);

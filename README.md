@@ -1,4 +1,4 @@
-# ESP32 Marauder Eternal 1.15.1
+# ESP32 Marauder Eternal 1.15.5
 
 <img width="314" height="314" alt="esp32_marauder_eternal_source" src="https://github.com/user-attachments/assets/79332db4-7a71-423f-a99d-937090bb196f" />
 
@@ -19,7 +19,7 @@ Marauder code base by JustCallMeKoKo and modified for the Marauder Mini V3 only.
 ## Release identity
 
 - Product: `ESP32 Marauder Eternal`
-- Version: `v1.15.1`
+- Version: `v1.15.5`
 - Arduino ESP32 core used for the verified build: `3.3.4`
 - Board target: `esp32:esp32:esp32c5`
 - Options: `FlashSize=8M,PartitionScheme=custom,PSRAM=enabled`
@@ -62,6 +62,34 @@ rows remain green while the navigation cursor keeps its accent highlight. The
 operate on the resulting AP selections. The ESP32-C5 services different
 channels sequentially rather than simultaneously.
 
+**ForcePMKID** and **ForceProbe** are selected-target settings. Scan and select
+one or more AP radios under **WiFi > WiFi Sniffers > Select SSIDs** before
+enabling them. ForcePMKID adds bounded deauthentication attempts while the
+EAPOL sniffer runs; ForceProbe does the same while the probe-request sniffer
+runs. Both modes snapshot the selected BSSIDs and channels at startup and never
+transmit to newly observed or unselected APs. If no AP is selected, the scan is
+receive-only and reports **No APs Selected**.
+
+Broadcast and Station Deauth now show the active AP, channel, RSSI, BSSID, and
+the scanned Protected Management Frames (PMF) status. Live **Try**, **OK**, and
+**Fail** counters distinguish attempted frames from frames accepted by the
+ESP32 Wi-Fi driver. **OK** is not proof that a client received the frame or
+disconnected; raw management-frame injection does not provide a client ACK.
+
+When **EPDeauth** is enabled, the running Evil Portal screen uses the same live
+target, PMF, **Try**, **OK**, and **Fail** diagnostics. It also shows the number
+of clients currently associated with the portal and lists captured credentials
+below the radio status, newest first. Use **Up** and **Down** to scroll through
+the combined status and capture view; **Center** still stops the portal and
+returns to the menu.
+
+**WiFi > WiFi Sniffers > Select Stations** uses the same SSID grouping and
+strongest-signal ordering. Each SSID row shows selected/total station counts
+and the number of AP radios in the group. Opening an SSID lists every unique
+captured client associated with any of its APs, together with the applicable
+channel. Select individual clients or use **Select All** for the entire SSID;
+the corresponding AP targets are selected automatically for Station Deauth.
+
 **WiFi > WiFi Sniffers > Fox Hunt** uses the same SSID and AP hierarchy. Select
 one AP to reveal **Start Fox Hunt** at the bottom of its AP list. Fox Hunt does
 not offer **Select All** and rejects a second AP until the first is deselected.
@@ -103,7 +131,7 @@ For a blank board, or when the bootloader and partition table must also be
 restored, use this one firmware payload:
 
 ```text
-release/Marauder_Eternal_1.15.1_MiniV3_ESP32-C5.bin
+release/Marauder_Eternal_1.15.5_MiniV3_ESP32-C5.bin
 ```
 
 It is an 8 MB merged image containing the ESP32-C5 bootloader, partition
@@ -136,6 +164,14 @@ Windows. Packaged builds include the verified 8 MB full-device image and provide
 - safe detection of full-device (`0x0`) and application images; application
   images are written to both OTA slots (`0x10000` and `0x400000`);
 - a single **Connect & Flash** button;
+- an **SD Files** browser that copies selected files or the complete SD folder
+  structure over one persistent USB serial session without removing the card;
+- an enlarged SD Files layout with prominent red loading, download, upload, and
+  shutdown messages while the user is waiting for serial operations;
+- verified Evil Portal HTML uploads directly into `/evil_portal/html`, with
+  replacement confirmation and immediate availability in the device menu;
+- exact-size transfer framing and SHA-256 verification before a downloaded file
+  replaces its local destination or an uploaded template is committed;
 - ESP32-C5 identity checking before any write;
 - live percentage and progress-bar updates;
 - final success or failure status with a useful reason for common failures.
@@ -173,6 +209,48 @@ successful build, run:
 python3 scripts/package_release.py build
 python3 scripts/package_release.py --verify
 ```
+
+## SD card layout
+
+The firmware creates a predictable directory layout whenever an SD card is
+mounted. New output is stored by purpose instead of accumulating in the card
+root:
+
+```text
+/captures/          Wi-Fi packet captures (`.pcap`)
+/logs/              Network-scan and Bluetooth logs
+/gps/               GPS tracker and POI files (`.gpx`)
+/wardrive/          Wardrive logs, POIs, and upload sidecars
+/lists/             Saved SSID, AP/station, and AirTag lists
+/evil_portal/html/  Evil Portal HTML templates
+/evil_portal/       Evil Portal configuration and credential log
+/config/            WiGLE and WDG credential import files
+/firmware/          SD firmware-update images
+/spiffs/            SPIFFS backup/restore data used during migration
+/SCRIPTS/           Device scripts
+```
+
+Place an SD update at `/firmware/update.bin`. `/update.bin` in the root remains
+supported for older cards. Existing root-level captures, saved lists, portal
+templates, portal configuration, and API-import files also remain readable;
+new files are written to the structured locations. The on-device SD file menu
+shows relative paths such as `captures/eapol_0.pcap`, so files with identical
+names in different categories remain distinguishable.
+
+The desktop flasher's **SD Files** button reads this directory tree over USB
+serial. Stop any active scan, capture, attack, or Evil Portal session first,
+then refresh the list and download selected files or the entire card layout.
+Batch downloads recreate the SD directory structure on the computer. Each file
+is written to a temporary local file and SHA-256 verified before it replaces
+the selected destination. While this window is open, the device displays the
+active USB SD operation and locks normal controls; closing the window ends the
+session and restores the regular menu.
+
+New SD files use the device system clock. A valid GPS date/time automatically
+sets that clock in UTC. **Device > Set Date/Time** provides a manual UTC fallback
+using the directional buttons and center button. The last valid value is kept
+across restarts to prevent the FAT filesystem from falling back to 1979 while a
+new GPS fix is pending.
 
 ## Sensitive data and authorized use
 

@@ -16,6 +16,7 @@
 #endif
 #include "Buffer.h"
 #include "FirmwareMetadata.h"
+#include "StoragePaths.h"
 #ifdef HAS_SCREEN
   #include "Display.h"
 #endif
@@ -63,11 +64,14 @@ class SDInterface {
     String selected_file_name = "";
   
     bool initSD();
+    bool ensureStorageLayout();
 
-    LinkedList<String>* sd_files;
+    LinkedList<String>* sd_files = nullptr;
 
     void listDir(String str_dir);
-    void listDirToLinkedList(LinkedList<String>* file_names, String str_dir = "/", String ext = "");
+    void listDirToLinkedList(LinkedList<String>* file_names,
+                             String str_dir = "/", String ext = "",
+                             bool recursive = false);
     File getFile(String path);
     void runUpdate(String file_name = "");
     bool performUpdate(Stream &updateSource, size_t updateSize);
