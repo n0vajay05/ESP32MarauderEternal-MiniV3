@@ -1,4 +1,8 @@
-name: Build desktop flashers
+name: Build desktop flashers 1.3.5
+
+env:
+  FIRMWARE_VERSION: "1.15.5"
+  FLASHER_VERSION: "1.3.5"
 
 on:
   workflow_dispatch:
@@ -8,6 +12,7 @@ on:
       - "scripts/build-gui-*"
       - "release/*.bin"
       - "release/manifest.json"
+      - "VERSION"
       - ".github/workflows/build-flasher.yml"
 
 jobs:
@@ -36,6 +41,7 @@ jobs:
       - name: Test
         shell: bash
         run: |
+          test "$(head -n 1 VERSION)" = "Marauder Eternal ${FIRMWARE_VERSION}"
           python -m unittest discover -v
           python scripts/package_release.py --verify
           bash scripts/test-native.sh
@@ -50,6 +56,6 @@ jobs:
         run: ./dist/${{ matrix.platform }}/${{ matrix.executable }} --self-test
       - uses: actions/upload-artifact@v4
         with:
-          name: MarauderEternalFlasher-${{ matrix.platform }}
+          name: MarauderEternalFlasher-${{ env.FLASHER_VERSION }}-${{ matrix.platform }}
           path: dist/${{ matrix.platform }}/${{ matrix.executable }}
           if-no-files-found: error

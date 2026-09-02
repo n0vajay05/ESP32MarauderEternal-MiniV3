@@ -1,4 +1,7 @@
-name: Build Mini V3 firmware
+name: Build Mini V3 firmware 1.15.5
+
+env:
+  FIRMWARE_VERSION: "1.15.5"
 
 on:
   workflow_dispatch:
@@ -12,6 +15,7 @@ on:
       - "tests/native/**"
       - "release/manifest.json"
       - "release/SHA256SUMS"
+      - "VERSION"
       - ".github/workflows/build-firmware.yml"
   pull_request:
     paths:
@@ -20,6 +24,7 @@ on:
       - "scripts/build.sh"
       - "scripts/test-native.sh"
       - "tests/native/**"
+      - "VERSION"
       - ".github/workflows/build-firmware.yml"
 
 jobs:
@@ -39,11 +44,14 @@ jobs:
         run: ./scripts/build.sh build/ci
       - name: Test native helpers
         run: ./scripts/test-native.sh
+      - name: Verify version identity
+        shell: bash
+        run: test "$(head -n 1 VERSION)" = "Marauder Eternal ${FIRMWARE_VERSION}"
       - name: Verify checked-in release
         run: python3 scripts/package_release.py --verify
       - uses: actions/upload-artifact@v4
         with:
-          name: Marauder-Eternal-MiniV3-build
+          name: Marauder-Eternal-MiniV3-${{ env.FIRMWARE_VERSION }}-build
           path: |
             build/ci/MarauderEternal.ino.bin
             build/ci/MarauderEternal.ino.bootloader.bin
