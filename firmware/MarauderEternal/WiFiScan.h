@@ -457,11 +457,17 @@ class WiFiScan
     void resetActiveSnifferDeauth();
     uint8_t bluetoothScanTime = 5;
     int packets_sent = 0;
+    uint8_t preset_beacon_cursor = 0;
+    uint32_t beacon_tx_failures = 0;
+    uint32_t beacon_last_error_ms = 0;
+    esp_err_t beacon_last_error = ESP_OK;
     uint16_t deauth_ap_cursor = 0;
     uint16_t deauth_station_cursor = 0;
     uint16_t evil_portal_deauth_cursor = 0;
     uint32_t deauth_next_tx_ms = 0;
     uint32_t evil_portal_deauth_next_ms = 0;
+    uint32_t evil_portal_tx_started_ms = 0;
+    bool evil_portal_return_pending = false;
     uint32_t deauth_tx_attempts = 0;
     uint32_t deauth_tx_accepted = 0;
     uint32_t deauth_tx_failures = 0;
@@ -820,7 +826,9 @@ class WiFiScan
     void broadcastRandomSSID(uint32_t currentTime);
     void broadcastCustomBeacon(uint32_t current_time, ssid custom_ssid, bool for_camera = false);
     void broadcastCustomBeacon(uint32_t current_time, AccessPoint custom_ssid, int scan_mode);
-    void broadcastSetSSID(uint32_t current_time, const char* ESSID, uint8_t chan = 0, bool legit = false);
+    bool broadcastSetSSID(uint32_t current_time, const char* ESSID, uint8_t chan = 0, bool legit = false);
+    void recordBeaconTxFailure(uint32_t current_time, const char* stage,
+                               esp_err_t status, uint32_t count = 1);
     void executeFindMyLive(uint32_t current_time);
     void RunAPScan(uint8_t scan_mode, uint16_t color);
     void RunGPSNmea();

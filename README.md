@@ -62,6 +62,16 @@ rows remain green while the navigation cursor keeps its accent highlight. The
 operate on the resulting AP selections. The ESP32-C5 services different
 channels sequentially rather than simultaneously.
 
+**WiFi > Attacks > Funny SSID Beacon** and **Rick Roll Beacon** advertise all
+12 funny names or all eight lyric lines on 2.4 GHz channel 1. Each name retains
+its own BSSID while the mode runs, so nearby Wi-Fi scanners can discover the
+complete set. The screen shows **TX OK/s** (frames accepted by the Wi-Fi driver)
+and **Fail/s**, with the driver error if transmission fails. The transmitter
+waits for each frame's completion before submitting another, keeping at most
+one beacon outstanding in the radio's small transmit-buffer pool. Reception can be
+checked with a second device's Wi-Fi scan; these beacon-only names do not offer
+an internet connection. Press **Center** to stop.
+
 **ForcePMKID** and **ForceProbe** are selected-target settings. Scan and select
 one or more AP radios under **WiFi > WiFi Sniffers > Select SSIDs** before
 enabling them. ForcePMKID adds bounded deauthentication attempts while the
@@ -77,7 +87,16 @@ ESP32 Wi-Fi driver. **OK** is not proof that a client received the frame or
 disconnected; raw management-frame injection does not provide a client ACK.
 
 When **EPDeauth** is enabled, the running Evil Portal screen uses the same live
-target, PMF, **Try**, **OK**, and **Fail** diagnostics. It also shows the number
+target, PMF, **Try**, **OK**, and **Fail** diagnostics. Choosing the portal's
+SSID and channel preserves all explicitly selected AP targets. Deauthentication
+visits every selected BSSID in turn, including separate 2.4 GHz and 5 GHz radios
+with the same SSID. Each visit waits for queued frames to complete before
+returning to the portal channel. While clients are connected to the portal,
+other channels are deferred and resume automatically after the last client
+disconnects. The screen shows selected AP counts by band and the number
+temporarily deferred. The single radio serves one channel at a time.
+
+The Evil Portal screen also shows the number
 of clients currently associated with the portal and lists captured credentials
 below the radio status, newest first. Use **Up** and **Down** to scroll through
 the combined status and capture view; **Center** still stops the portal and

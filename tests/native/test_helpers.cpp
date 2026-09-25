@@ -1,8 +1,12 @@
 #include <assert.h>
+#include <initializer_list>
 #include <stdint.h>
 #include <string.h>
 
 #include "BeaconFrame.h"
+#include "BeaconTxPacer.h"
+#include "PortalTxTracker.h"
+#include "SelectedAPScheduler.h"
 #include "DeauthFrame.h"
 #include "DisplayLine.h"
 #include "RsnCapabilities.h"
@@ -10,7 +14,169 @@
 #include "UtcTime.h"
 #include "WdgResponse.h"
 
+static void testPortalScheduling() {
+  struct AP {
+    const char* ssid;
+    uint8_t channel;
+    bool selected;
+  };
+  const AP aps[] = {{"MainGuest", 1, true}, {"MainGuest", 36, true},
+                    {"Other selected SSID", 6, true}, {"Unselected", 1, false},
+                    {"MainGuest", 116, true}};
+  const auto get = [&aps](uint16_t i) { return aps[i]; };
+  uint16_t cursor = 0;
+  // Each selected BSSID gets a turn, even across SSIDs and bands.
+  for (int round = 0; round < 3; ++round) {
+    for (int expected : {0, 1, 2, 4})
+      assert(nextSelectedAP(5, cursor, 0, get) == expected);
+  }
+  // Clients constrain visits to the portal channel without losing selections.
+  for (int round = 0; round < 3; ++round)
+    assert(nextSelectedAP(5, cursor, 1, get) == 0);
+  assert(nextSelectedAP(5, cursor, 11, get) == -1);
+  for (int expected : {1, 2, 4, 0})
+    assert(nextSelectedAP(5, cursor, 0, get) == expected);
+  cursor = 99;
+  assert(nextSelectedAP(5, cursor, 0, get) == 0);
+  assert(nextSelectedAP(0, cursor, 0, get) == -1 && cursor == 0);
+
+  PortalTxTracker tx;
+  tx.submitted();
+  tx.submitted();
+  tx.submitted();
+  assert(tx.pending() == 3);
+  tx.completed(true);
+  tx.completed(true);
+  assert(tx.pending() == 1); // cannot return home with the last frame queued
+  tx.completed(false);
+  assert(tx.pending() == 0);
+  assert(tx.takeFailures() == 1 && tx.takeFailures() == 0);
+  tx.submitted();
+  tx.completed(true); // callback before the driver's enqueue call returns
+  assert(tx.pending() == 0);
+  tx.submitted();
+  tx.rejected();
+  assert(tx.pending() == 0 && tx.takeFailures() == 0);
+  tx.completed(false); // stale callback must not underflow the pending count
+  assert(tx.pending() == 0 && tx.takeFailures() == 0);
+  tx.submitted();
+  tx.reset();
+  assert(tx.pending() == 0 && tx.takeFailures() == 0);
+}
+
+static void testBeaconTxPacing() {
+  BeaconTxPacer pacer;
+  pacer.reset(100);
+  assert(pacer.ready(100));
+  pacer.begin(100);
+  // A slow driver must not receive more frames just because 8 ms elapsed.
+  assert(!pacer.ready(108));
+  assert(!pacer.ready(1099));
+  assert(!pacer.stalled(1099));
+  assert(pacer.stalled(1100));
+  assert(!pacer.ready(1100)); // a timeout reports an error, not another enqueue
+  pacer.complete();
+  assert(pacer.ready(1100));
+  assert(!pacer.stalled(1100));
+
+  pacer.begin(1100);
+  pacer.complete(); // callback can arrive before esp_wifi_80211_tx returns
+  assert(!pacer.ready(1107));
+  assert(pacer.ready(1108));
+  pacer.begin(1108);
+  pacer.rejected(1108);
+  assert(!pacer.ready(1157));
+  assert(pacer.ready(1158));
+
+  pacer.begin(1158);
+  pacer.reset(1200); // restarting clears outstanding state and deadlines
+  assert(pacer.ready(1200));
+  assert(!pacer.stalled(1200));
+  pacer.reset(UINT32_MAX - 3);
+  pacer.begin(UINT32_MAX - 3);
+  pacer.complete();
+  assert(!pacer.ready(3));
+  assert(pacer.ready(4));
+  pacer.begin(UINT32_MAX - 10);
+  assert(!pacer.stalled(988));
+  assert(pacer.stalled(989));
+}
+
+static void testSsidBeacons() {
+  const uint8_t mac[6] = {0x10, 0x20, 0x30, 0x40, 0x50, 0x60};
+  uint8_t frame[MAX_SSID_BEACON_SIZE + 1];
+  // Reuse storage in both length directions, including the maximum SSID.
+  const char* names[] = {"Dora the Internet Explorer", "Loading...",
+                        "01234567890123456789012345678901", "A"};
+  for (const char* name : names) {
+    const size_t ssid_length = strlen(name);
+    for (uint8_t channel : {1, 6, 11}) {
+      memset(frame, 0xa5, sizeof(frame));
+      const size_t length = buildSsidBeaconFrame(
+          frame, sizeof(frame), name, mac, channel, 0x0807060504030201ULL);
+      assert(length == 57 + ssid_length);
+      assert(frame[length] == 0xa5); // never write past the returned length
+      assert(frame[0] == 0x80 && frame[1] == 0);
+      for (size_t i = 4; i < 10; ++i)
+        assert(frame[i] == 0xff);
+      assert((frame[10] & 0x03) == 0x02);
+      assert(memcmp(frame + 10, frame + 16, 6) == 0);
+      for (size_t i = 0; i < 8; ++i)
+        assert(frame[24 + i] == i + 1);
+      assert(frame[32] == 100 && frame[33] == 0);
+      assert((frame[34] & 0x11) == 0x01); // ESS, open
+
+      // Parse the complete IE chain like a receiver, rejecting trailing junk,
+      // truncated elements, duplicate SSID tags and mismatched channel tags.
+      const uint8_t expected_ids[] = {0, 1, 3, 5};
+      size_t offset = 36;
+      size_t tag = 0;
+      while (offset < length) {
+        assert(offset + 2 <= length);
+        const uint8_t id = frame[offset++];
+        const uint8_t size = frame[offset++];
+        assert(tag < sizeof(expected_ids) && id == expected_ids[tag++]);
+        assert(offset + size <= length);
+        if (id == 0) {
+          assert(size == ssid_length);
+          assert(memcmp(frame + offset, name, size) == 0);
+        } else if (id == 1) {
+          assert(size == 8 && frame[offset] == 0x82);
+        } else if (id == 3) {
+          assert(size == 1 && frame[offset] == channel);
+        } else {
+          assert(size == 4 && frame[offset + 1] == 1);
+        }
+        offset += size;
+      }
+      assert(offset == length && tag == sizeof(expected_ids));
+      uint8_t bssid[6];
+      memcpy(bssid, frame + 10, sizeof(bssid));
+      assert(buildSsidBeaconFrame(frame, sizeof(frame), "Other", mac, channel, 9));
+      assert(memcmp(bssid, frame + 10, sizeof(bssid)) != 0);
+      assert(buildSsidBeaconFrame(frame, sizeof(frame), name, mac, channel, 10));
+      assert(memcmp(bssid, frame + 10, sizeof(bssid)) == 0);
+    }
+  }
+  assert(buildSsidBeaconFrame(frame, sizeof(frame), "Flock", mac, 1, 0, true));
+  assert(memcmp(frame + 10, mac, sizeof(mac)) == 0);
+  assert(!buildSsidBeaconFrame(nullptr, sizeof(frame), "A", mac, 1, 0));
+  assert(!buildSsidBeaconFrame(frame, sizeof(frame), nullptr, mac, 1, 0));
+  assert(!buildSsidBeaconFrame(frame, sizeof(frame), "A", nullptr, 1, 0));
+  assert(!buildSsidBeaconFrame(frame, sizeof(frame), "", mac, 1, 0));
+  assert(!buildSsidBeaconFrame(frame, sizeof(frame),
+                             "012345678901234567890123456789012", mac, 1, 0));
+  assert(!buildSsidBeaconFrame(frame, 57, "A", mac, 1, 0));
+  for (uint8_t channel : {0, 12, 36, 255})
+    assert(!buildSsidBeaconFrame(frame, sizeof(frame), "A", mac, channel, 0));
+  const uint8_t multicast[6] = {0xff, 0xff, 0xff, 0xff, 0xff, 0xff};
+  assert(!buildSsidBeaconFrame(frame, sizeof(frame), "A", multicast, 1, 0));
+}
+
 int main() {
+  testPortalScheduling();
+  testBeaconTxPacing();
+  testSsidBeacons();
   uint8_t beacon[64] = {};
   assert(!setBeaconFrameChannel(nullptr, sizeof(beacon), 4, 6));
   assert(!setBeaconFrameChannel(beacon, 54, 4, 6));

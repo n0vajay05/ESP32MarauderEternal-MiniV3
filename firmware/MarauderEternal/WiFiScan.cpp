@@ -1,6 +1,9 @@
 #include "esp_random.h"
 #include "WiFiScan.h"
 #include "BeaconFrame.h"
+#include "BeaconTxPacer.h"
+#include "PortalTxTracker.h"
+#include "SelectedAPScheduler.h"
 #include "DeauthFrame.h"
 #include "WdgResponse.h"
 #include "BLEFlockDetector.h"
@@ -16,6 +19,42 @@
 #endif
 
 namespace {
+BeaconTxPacer presetBeaconTx;
+std::atomic<uint32_t> presetBeaconCompletionFailures{0};
+bool presetBeaconCallbackRegistered = false;
+
+void presetBeaconTxDone(const esp_80211_tx_info_t* info) {
+  if (info == nullptr || info->ifidx != WIFI_IF_AP)
+    return;
+  // This callback runs in the Wi-Fi task. Keep it allocation-free and leave
+  // logging, display updates and all further transmissions to the main loop.
+  if (info->tx_status != WIFI_SEND_SUCCESS)
+    presetBeaconCompletionFailures.fetch_add(1);
+  presetBeaconTx.complete();
+}
+
+void detachPresetBeaconTx() {
+  if (presetBeaconCallbackRegistered) {
+    esp_wifi_register_80211_tx_cb(nullptr);
+    presetBeaconCallbackRegistered = false;
+  }
+}
+
+PortalTxTracker portalDeauthTx;
+bool portalDeauthCallbackRegistered = false;
+
+void portalDeauthTxDone(const esp_80211_tx_info_t* info) {
+  if (info != nullptr && info->ifidx == WIFI_IF_AP)
+    portalDeauthTx.completed(info->tx_status == WIFI_SEND_SUCCESS);
+}
+
+void detachPortalDeauthTx() {
+  if (portalDeauthCallbackRegistered) {
+    esp_wifi_register_80211_tx_cb(nullptr);
+    portalDeauthCallbackRegistered = false;
+  }
+}
+
 constexpr uint16_t SSID_FINDER_CHANNEL_DWELL_MS = 300;
 constexpr uint16_t SSID_FINDER_UI_REFRESH_MS = 150;
 constexpr uint16_t SSID_FINDER_TREND_INTERVAL_MS = 1500;
@@ -30,7 +69,7 @@ constexpr uint16_t EVIL_PORTAL_UI_REFRESH_MS = 250;
 constexpr uint32_t EVIL_PORTAL_MINIMUM_FREE_HEAP = 64 * 1024;
 constexpr uint8_t EVIL_PORTAL_VISIBLE_ROWS = 13;
 constexpr uint8_t EVIL_PORTAL_LINE_HEIGHT = 9;
-constexpr uint8_t EVIL_PORTAL_BASE_LINES = 10;
+constexpr uint8_t EVIL_PORTAL_BASE_LINES = 12;
 constexpr uint8_t EVIL_PORTAL_LINE_CHARS = 19;
 constexpr uint16_t MAX_TRANSIENT_SSIDS = 256;
 constexpr uint16_t MAX_BLE_DEVICES = 256;
@@ -3644,6 +3683,23 @@ void WiFiScan::drawEvilPortalStatus() {
       target = access_points->get(ap_index);
 
     const uint8_t clients = evil_portal_obj.getConnectedClientCount();
+    uint16_t selected_24 = 0;
+    uint16_t selected_5 = 0;
+    uint16_t deferred = 0;
+    const uint8_t portal_channel = evil_portal_obj.getTargetAPChannel();
+    if (this->ep_deauth && access_points != nullptr) {
+      for (int index = 0; index < access_points->size(); ++index) {
+        const AccessPoint ap = access_points->get(index);
+        if (!ap.selected)
+          continue;
+        if (ap.channel <= 14)
+          ++selected_24;
+        else
+          ++selected_5;
+        if (clients > 0 && ap.channel != portal_channel)
+          ++deferred;
+      }
+    }
     char attempts[12] = {};
     char accepted[12] = {};
     char failures[12] = {};
@@ -3732,6 +3788,20 @@ void WiFiScan::drawEvilPortalStatus() {
         color = this->ep_deauth ? TFT_YELLOW : TFT_DARKGREY;
       }
       else if (logical_line == 9) {
+        snprintf(line, sizeof(line), "APs:%u 2G:%u 5G:%u",
+                 selected_24 + selected_5, selected_24, selected_5);
+        color = TFT_CYAN;
+      }
+      else if (logical_line == 10) {
+        if (deferred > 0) {
+          snprintf(line, sizeof(line), "Other CH paused:%u", deferred);
+          color = TFT_ORANGE;
+        } else {
+          snprintf(line, sizeof(line), "Portal CH:%u", portal_channel);
+          color = TFT_CYAN;
+        }
+      }
+      else if (logical_line == 11) {
         if (clients > 0)
           snprintf(line, sizeof(line), "Cli:%u ON Capt:%d", clients,
                    credential_count);
@@ -3790,6 +3860,10 @@ void WiFiScan::drawEvilPortalStatus() {
 bool WiFiScan::startWiFiAttacks(uint8_t scan_mode, uint16_t color,
                                 const char* title_string) {
   packets_sent = 0;
+  this->preset_beacon_cursor = 0;
+  this->beacon_tx_failures = 0;
+  this->beacon_last_error_ms = 0;
+  this->beacon_last_error = ESP_OK;
   this->deauth_tx_ready = false;
   this->deauth_ap_cursor = 0;
   this->deauth_station_cursor = 0;
@@ -3854,7 +3928,7 @@ bool WiFiScan::startWiFiAttacks(uint8_t scan_mode, uint16_t color,
   // Rick Roll and Funny SSID use a legacy DSSS/2.4 GHz beacon template. Do
   // not reuse a 5 GHz or region-specific channel left by a previous dual-band
   // tool: the C5 rejects that soft-AP configuration with ESP_ERR_INVALID_ARG.
-  // Channel 1 is a deterministic bootstrap; the transmit loop rotates later.
+  // Keep the presets on channel 1 so a scanner can receive the complete set.
   ap_config.ap.channel = legacy_2_4_beacon_mode ? 1 :
       (this->validDeauthChannel(this->set_channel) ? this->set_channel : 1);
   ap_config.ap.authmode = WIFI_AUTH_OPEN;
@@ -3905,6 +3979,7 @@ bool WiFiScan::startWiFiAttacks(uint8_t scan_mode, uint16_t color,
                   stage, esp_err_to_name(status),
                   static_cast<unsigned long>(ESP.getFreeHeap()),
                   static_cast<unsigned long>(ESP.getMaxAllocHeap()));
+    detachPresetBeaconTx();
     esp_wifi_set_promiscuous(false);
     esp_wifi_stop();
     esp_wifi_deinit();
@@ -3964,6 +4039,13 @@ bool WiFiScan::startWiFiAttacks(uint8_t scan_mode, uint16_t color,
   status = esp_wifi_start();
   if (status != ESP_OK)
     return fail_start("Driver start", status);
+  #ifdef HAS_DUAL_BAND
+    if (legacy_2_4_beacon_mode) {
+      status = esp_wifi_set_band_mode(WIFI_BAND_MODE_2G_ONLY);
+      if (status != ESP_OK)
+        return fail_start("2.4 GHz mode", status);
+    }
+  #endif
   this->setMac();
   status = esp_wifi_set_channel(ap_config.ap.channel,
                                 WIFI_SECOND_CHAN_NONE);
@@ -3983,6 +4065,14 @@ bool WiFiScan::startWiFiAttacks(uint8_t scan_mode, uint16_t color,
   // The C5 driver can report started before its transmit-side state is usable
   // after repeated stop/start cycles. Do not schedule a raw frame immediately.
   delay(75);
+  if (legacy_2_4_beacon_mode) {
+    presetBeaconTx.reset(millis());
+    presetBeaconCompletionFailures.store(0);
+    status = esp_wifi_register_80211_tx_cb(presetBeaconTxDone);
+    if (status != ESP_OK)
+      return fail_start("TX callback", status);
+    presetBeaconCallbackRegistered = true;
+  }
   this->deauth_next_tx_ms = millis() + 75;
   this->deauth_tx_ready = deauth_mode;
   this->setLEDMode(MODE_ATTACK);
@@ -4047,6 +4137,8 @@ void WiFiScan::drawCameraDeauthStatus() {
 }
 
 bool WiFiScan::shutdownWiFi(bool force) {
+  detachPresetBeaconTx();
+  detachPortalDeauthTx();
   if (!this->wifi_initialized && !force)
     return false;
 
@@ -4216,8 +4308,10 @@ void WiFiScan::StopScan(uint8_t scan_mode) {
     // Stop portal-owned DNS/web/AP resources while its AP is still alive.
     // Generic Wi-Fi teardown follows and must not call portal cleanup for an
     // unrelated scan or attack.
-    if (stoppingEvilPortal)
+    if (stoppingEvilPortal) {
+      detachPortalDeauthTx();
       evil_portal_obj.cleanup();
+    }
 
     const bool preserve_network =
         scanNeedsNetworkConnection(currentScanMode) && this->wifi_connected;
@@ -4362,6 +4456,7 @@ void WiFiScan::StopScan(uint8_t scan_mode) {
   this->evil_portal_deauth_cursor = 0;
   this->deauth_next_tx_ms = 0;
   this->evil_portal_deauth_next_ms = 0;
+  this->evil_portal_return_pending = false;
   this->deauth_tx_attempts = 0;
   this->deauth_tx_accepted = 0;
   this->deauth_tx_failures = 0;
@@ -5690,6 +5785,7 @@ bool WiFiScan::RunEvilPortal(uint8_t scan_mode, uint16_t color) {
 
   this->evil_portal_deauth_cursor = 0;
   this->evil_portal_deauth_next_ms = millis();
+  this->evil_portal_return_pending = false;
   this->deauth_tx_attempts = 0;
   this->deauth_tx_accepted = 0;
   this->deauth_tx_failures = 0;
@@ -5710,6 +5806,18 @@ bool WiFiScan::RunEvilPortal(uint8_t scan_mode, uint16_t color) {
   // Keep the cached channel synchronized so the first EPDeauth batch is not
   // accidentally transmitted on a stale channel from the preceding workflow.
   this->set_channel = evil_portal_obj.getTargetAPChannel();
+  if (this->ep_deauth) {
+    portalDeauthTx.reset();
+    const esp_err_t status = esp_wifi_register_80211_tx_cb(portalDeauthTxDone);
+    if (status != ESP_OK) {
+      Serial.printf("[EPDeauth] TX callback failed: %s\n", esp_err_to_name(status));
+      evil_portal_obj.cleanup();
+      this->wifi_initialized = false;
+      this->setLEDMode(MODE_OFF);
+      return false;
+    }
+    portalDeauthCallbackRegistered = true;
+  }
   this->wifi_initialized = true;
   this->deauth_tx_ready = true;
   initTime = millis();
@@ -11042,71 +11150,64 @@ void WiFiScan::broadcastCustomBeacon(uint32_t current_time, ssid custom_ssid, bo
 
 }
 
-// Function to send beacons with random ESSID length
-void WiFiScan::broadcastSetSSID(uint32_t current_time, const char* ESSID, uint8_t chan, bool legit) {
-
-  if (chan == 0) {
-    // This beacon body advertises DSSS rates and a DS Parameter element, so it
-    // is a 2.4 GHz frame even on dual-band hardware. Selecting from the full
-    // C5 table caused invalid channel switches and poisoned the next restart.
-    set_channel = random(1, 12);
+void WiFiScan::recordBeaconTxFailure(uint32_t current_time, const char* stage,
+                                   esp_err_t status, uint32_t count) {
+  this->beacon_tx_failures += count;
+  if (this->beacon_last_error == ESP_OK ||
+      current_time - this->beacon_last_error_ms >= 1000) {
+    Serial.printf("[Beacon] %s failed: %s\n", stage, esp_err_to_name(status));
+    this->beacon_last_error_ms = current_time;
   }
-  else {
-    set_channel = chan;
-  }
+  this->beacon_last_error = status;
+}
 
-  this->changeChannel(set_channel);
-  // (changeChannel() already delay(1)'d for the channel switch to settle; the extra
-  // delay here was a redundant per-frame block on the beacon-spam path.)
+// Send one complete preset beacon. Calls are paced by the preset scheduler.
+bool WiFiScan::broadcastSetSSID(uint32_t current_time, const char* ESSID,
+                                uint8_t chan, bool legit) {
+  const auto failed = [this, current_time](const char* stage, esp_err_t status) {
+    this->recordBeaconTxFailure(current_time, stage, status);
+  };
 
-  // Randomize SRC MAC
-  if(!legit) {
-    packet[10] = packet[16] = random(256);
-    packet[11] = packet[17] = random(256);
-    packet[12] = packet[18] = random(256);
-    packet[13] = packet[19] = random(256);
-    packet[14] = packet[20] = random(256);
-    packet[15] = packet[21] = random(256);
-  } else {
-    uint8_t ap_mac[6];
-    esp_read_mac(ap_mac, ESP_MAC_WIFI_SOFTAP);
-    packet[10] = packet[16] = ap_mac[0];
-    packet[11] = packet[17] = ap_mac[1];
-    packet[12] = packet[18] = ap_mac[2];
-    packet[13] = packet[19] = ap_mac[3];
-    packet[14] = packet[20] = ap_mac[4];
-    packet[15] = packet[21] = ap_mac[5];
+  const uint8_t channel = chan == 0 ? this->set_channel : chan;
+  uint8_t ap_mac[6];
+  esp_err_t status = esp_wifi_get_mac(WIFI_IF_AP, ap_mac);
+  if (status != ESP_OK) {
+    failed("AP MAC", status);
+    return false;
   }
 
-  int ssidLen = strlen(ESSID);
-  //int rand_len = sizeof(rand_reg);
-  int fullLen = ssidLen;
-  packet[37] = fullLen;
+  uint8_t frame[MAX_SSID_BEACON_SIZE];
+  const size_t frame_length = buildSsidBeaconFrame(
+      frame, sizeof(frame), ESSID, ap_mac, channel, esp_timer_get_time(), legit);
+  if (frame_length == 0) {
+    failed("Frame", ESP_ERR_INVALID_ARG);
+    return false;
+  }
 
-  // Insert my tag
-  for(int i = 0; i < ssidLen; i++)
-    packet[38 + i] = ESSID[i];
+  // Verify the radio channel before advertising it in the DS parameter IE.
+  uint8_t actual_channel = 0;
+  wifi_second_chan_t secondary;
+  status = esp_wifi_get_channel(&actual_channel, &secondary);
+  if (status != ESP_OK) {
+    failed("Read channel", status);
+    return false;
+  }
+  if (actual_channel != channel) {
+    status = esp_wifi_set_channel(channel, WIFI_SECOND_CHAN_NONE);
+    if (status != ESP_OK) {
+      failed("Set channel", status);
+      return false;
+    }
+    delay(1);
+  }
+  this->set_channel = channel;
 
-  /////////////////////////////
-  
-  packet[50 + fullLen] = set_channel;
-
-  uint8_t postSSID[13] = {0x01, 0x08, 0x82, 0x84, 0x8b, 0x96, 0x24, 0x30, 0x48, 0x6c, //supported rate
-                      0x03, 0x01, 0x04 /*DSSS (Current Channel)*/ };
-
-
-
-  // Add everything that goes after the SSID
-  for(int i = 0; i < 12; i++) 
-    packet[38 + fullLen + i] = postSSID[i];
-  
-
-  esp_wifi_80211_tx(WIFI_IF_AP, packet, sizeof(packet), false);
-  esp_wifi_80211_tx(WIFI_IF_AP, packet, sizeof(packet), false);
-  esp_wifi_80211_tx(WIFI_IF_AP, packet, sizeof(packet), false);
-
-  packets_sent = packets_sent + 3;
-  
+  status = esp_wifi_80211_tx(WIFI_IF_AP, frame, frame_length, true);
+  if (status == ESP_OK)
+    ++packets_sent;
+  else
+    failed("Transmit", status);
+  return status == ESP_OK;
 }
 
 // Function for sending crafted beacon frames
@@ -11398,8 +11499,12 @@ uint8_t WiFiScan::sendDeauthFrame(const uint8_t bssid[6], int channel,
   uint8_t sent = 0;
   const auto transmit = [this, &sent]() {
     this->deauth_tx_attempts++;
+    const bool portal_tx = this->currentScanMode == WIFI_SCAN_EVIL_PORTAL &&
+                           portalDeauthCallbackRegistered;
+    if (portal_tx)
+      portalDeauthTx.submitted();
     const esp_err_t status = esp_wifi_80211_tx(
-        WIFI_IF_AP, deauth_frame_default, sizeof(deauth_frame_default), false);
+        WIFI_IF_AP, deauth_frame_default, sizeof(deauth_frame_default), portal_tx);
     if (status == ESP_OK) {
       this->deauth_tx_accepted++;
       this->packets_sent++;
@@ -11407,6 +11512,8 @@ uint8_t WiFiScan::sendDeauthFrame(const uint8_t bssid[6], int channel,
       return;
     }
 
+    if (portal_tx)
+      portalDeauthTx.rejected();
     this->deauth_tx_failures++;
     const uint32_t now = millis();
     if (now - this->deauth_last_error_ms >= 1000) {
@@ -11459,17 +11566,23 @@ bool WiFiScan::sendNextSelectedAPDeauth(const uint8_t destination[6],
   }
 
   const uint16_t count = static_cast<uint16_t>(access_points->size());
-  if (cursor >= count)
-    cursor = 0;
-
-  for (uint16_t attempt = 0; attempt < count; attempt++) {
-    const uint16_t index = cursor;
-    cursor = (cursor + 1) % count;
+  const bool portal_mode = this->currentScanMode == WIFI_SCAN_EVIL_PORTAL;
+  const uint8_t portal_channel = evil_portal_obj.getTargetAPChannel();
+  const bool keep_portal_channel = portal_mode &&
+      evil_portal_obj.getConnectedClientCount() != 0;
+  const int index = nextSelectedAP(count, cursor,
+      keep_portal_channel ? portal_channel : 0,
+      [](uint16_t candidate) { return access_points->get(candidate); });
+  if (index >= 0) {
     const AccessPoint access_point = access_points->get(index);
-    if (!access_point.selected)
-      continue;
     this->deauth_active_ap_index = index;
     this->deauth_active_station_index = -1;
+    if (portal_mode)
+      Serial.printf("[EPDeauth] target %02X:%02X:%02X:%02X:%02X:%02X ch=%u\n",
+                    access_point.bssid[0], access_point.bssid[1],
+                    access_point.bssid[2], access_point.bssid[3],
+                    access_point.bssid[4], access_point.bssid[5],
+                    access_point.channel);
     this->sendDeauthFrame(access_point.bssid, access_point.channel,
                           destination);
     return true;
@@ -13625,6 +13738,32 @@ void WiFiScan::updateTrackerUI() {
 }
 
 void WiFiScan::displayTransmitRate() {
+  if (this->currentScanMode == WIFI_ATTACK_RICK_ROLL ||
+      this->currentScanMode == WIFI_ATTACK_FUNNY_BEACON) {
+    Serial.printf("[Beacon] channel=%u accepted/s=%d failed/s=%lu\n",
+                  this->set_channel, packets_sent,
+                  static_cast<unsigned long>(this->beacon_tx_failures));
+    #ifdef HAS_SCREEN
+      char line[32];
+      display_obj.tft.fillRect(0, TFT_HEIGHT / 2 - 16, TFT_WIDTH, 64, TFT_BLACK);
+      display_obj.tft.setTextColor(TFT_GREEN, TFT_BLACK);
+      snprintf(line, sizeof(line), "TX OK/s: %d", packets_sent);
+      display_obj.showCenterText(line, TFT_HEIGHT / 2 - 16);
+      display_obj.tft.setTextColor(this->beacon_tx_failures ? TFT_RED : TFT_GREEN,
+                                   TFT_BLACK);
+      snprintf(line, sizeof(line), "Fail/s: %lu",
+               static_cast<unsigned long>(this->beacon_tx_failures));
+      display_obj.showCenterText(line, TFT_HEIGHT / 2);
+      display_obj.tft.setTextColor(TFT_WHITE, TFT_BLACK);
+      snprintf(line, sizeof(line), "Channel: %u", this->set_channel);
+      display_obj.showCenterText(line, TFT_HEIGHT / 2 + 16);
+      if (this->beacon_tx_failures)
+        display_obj.showCenterText(esp_err_to_name(this->beacon_last_error),
+                                   TFT_HEIGHT / 2 + 32);
+    #endif
+    return;
+  }
+
   String displayString = "";
   String displayString2 = "";
   displayString.concat(text18);
@@ -14558,7 +14697,52 @@ void WiFiScan::main(uint32_t currentTime)
     }
   }
   else if (currentScanMode == WIFI_SCAN_EVIL_PORTAL) {
-    if (this->ep_deauth &&
+    const uint32_t completion_failures = portalDeauthTx.takeFailures();
+    this->deauth_tx_failures += completion_failures;
+    if (completion_failures)
+      Serial.printf("[EPDeauth] %lu frame completion failures\n",
+                    static_cast<unsigned long>(completion_failures));
+
+    if (this->evil_portal_return_pending) {
+      if (portalDeauthTx.pending() == 0) {
+        const uint8_t portal_channel = evil_portal_obj.getTargetAPChannel();
+        uint8_t actual_channel = 0;
+        wifi_second_chan_t secondary;
+        esp_err_t status = esp_wifi_get_channel(&actual_channel, &secondary);
+        // Do not call set_channel for an on-channel visit with clients attached.
+        // A client that joins during an off-channel visit also takes priority;
+        // finish returning home after that client leaves.
+        const bool wait_for_client = status == ESP_OK &&
+            actual_channel != portal_channel &&
+            evil_portal_obj.getConnectedClientCount() != 0;
+        if (status == ESP_OK && actual_channel != portal_channel &&
+            !wait_for_client)
+          status = esp_wifi_set_channel(portal_channel, WIFI_SECOND_CHAN_NONE);
+        if (status == ESP_OK && !wait_for_client) {
+          this->set_channel = portal_channel;
+          this->evil_portal_return_pending = false;
+          this->evil_portal_deauth_next_ms =
+              currentTime + EVIL_PORTAL_DEAUTH_INTERVAL_MS;
+          Serial.printf("[EPDeauth] home ch=%u Try=%lu OK=%lu Fail=%lu\n",
+                        portal_channel,
+                        static_cast<unsigned long>(this->deauth_tx_attempts),
+                        static_cast<unsigned long>(this->deauth_tx_accepted),
+                        static_cast<unsigned long>(this->deauth_tx_failures));
+        } else if (status != ESP_OK &&
+                   currentTime - this->deauth_last_error_ms >= 1000) {
+          this->deauth_last_error_ms = currentTime;
+          this->deauth_tx_failures++;
+          Serial.printf("[EPDeauth] Return to channel %u failed: %s\n",
+                        portal_channel, esp_err_to_name(status));
+        }
+      } else if (currentTime - this->evil_portal_tx_started_ms >= 1000 &&
+                 currentTime - this->deauth_last_error_ms >= 1000) {
+        this->deauth_last_error_ms = currentTime;
+        this->deauth_tx_failures++;
+        Serial.println(F("[EPDeauth] Waiting for frame completion; channel held"));
+      }
+    }
+    if (this->ep_deauth && !this->evil_portal_return_pending &&
         static_cast<int32_t>(currentTime -
                              this->evil_portal_deauth_next_ms) >= 0) {
       this->evil_portal_deauth_next_ms =
@@ -14567,12 +14751,10 @@ void WiFiScan::main(uint32_t currentTime)
           0xff, 0xff, 0xff, 0xff, 0xff, 0xff};
       if (this->sendNextSelectedAPDeauth(
               broadcast, this->evil_portal_deauth_cursor)) {
-        // The C5 has one Wi-Fi radio. Return it to the portal's anchor channel
-        // immediately after each bounded off-channel transmission batch.
-        const uint8_t portal_channel = evil_portal_obj.getTargetAPChannel();
-        if (this->validDeauthChannel(portal_channel) &&
-            this->set_channel != portal_channel)
-          this->changeChannel(portal_channel);
+        // The driver queues raw frames asynchronously. Hold this channel until
+        // every accepted frame completes, then give the portal time at home.
+        this->evil_portal_return_pending = true;
+        this->evil_portal_tx_started_ms = currentTime;
       }
     }
 
@@ -14781,40 +14963,39 @@ void WiFiScan::main(uint32_t currentTime)
       packets_sent = 0;
     }*/
   }
-  else if ((currentScanMode == WIFI_ATTACK_RICK_ROLL)) {
-    // Need this for loop because getTouch causes ~10ms delay
-    // which makes beacon spam less effective
-    for (int i = 0; i < 7; i++)
-    {
-      for (int x = 0; x < (sizeof(rick_roll)/sizeof(char *)); x++)
-      {
-        broadcastSetSSID(currentTime, rick_roll[x]);
+  else if (currentScanMode == WIFI_ATTACK_RICK_ROLL ||
+           currentScanMode == WIFI_ATTACK_FUNNY_BEACON) {
+    const bool rick = currentScanMode == WIFI_ATTACK_RICK_ROLL;
+    const char* const* presets = rick ? rick_roll : funny_beacon;
+    const size_t count = rick ? sizeof(rick_roll) / sizeof(rick_roll[0]) :
+                               sizeof(funny_beacon) / sizeof(funny_beacon[0]);
+    const uint32_t completion_failures = presetBeaconCompletionFailures.exchange(0);
+    if (completion_failures)
+      this->recordBeaconTxFailure(currentTime, "Completion", ESP_FAIL,
+                                  completion_failures);
+    if (presetBeaconTx.stalled(currentTime) &&
+        currentTime - this->beacon_last_error_ms >= 1000)
+      this->recordBeaconTxFailure(currentTime, "Completion timeout", ESP_ERR_TIMEOUT);
+
+    // A timer alone can overrun the C5's small static TX pool under contention.
+    // Wait for completion, keeping the menu responsive while the radio drains.
+    if (presetBeaconTx.ready(currentTime)) {
+      if (this->preset_beacon_cursor >= count)
+        this->preset_beacon_cursor = 0;
+      presetBeaconTx.begin(currentTime);
+      if (this->broadcastSetSSID(currentTime, presets[this->preset_beacon_cursor])) {
+        ++this->preset_beacon_cursor;
+      } else {
+        // A busy driver must not drop a name from this pass through the list.
+        // Give its transmit buffers time to drain before retrying that name.
+        presetBeaconTx.rejected(currentTime);
       }
     }
-
-    if (currentTime - initTime >= 1000)
-    {
-      initTime = millis();
+    if (static_cast<int32_t>(currentTime - initTime) >= 1000) {
+      initTime = currentTime;
       this->displayTransmitRate();
       packets_sent = 0;
-    }
-  }
-  else if ((currentScanMode == WIFI_ATTACK_FUNNY_BEACON)) {
-    // Need this for loop because getTouch causes ~10ms delay
-    // which makes beacon spam less effective
-    for (int i = 0; i < 7; i++)
-    {
-      for (int x = 0; x < (sizeof(funny_beacon)/sizeof(char *)); x++)
-      {
-        broadcastSetSSID(currentTime, funny_beacon[x]);
-      }
-    }
-
-    if (currentTime - initTime >= 1000)
-    {
-      initTime = millis();
-      this->displayTransmitRate();
-      packets_sent = 0;
+      this->beacon_tx_failures = 0;
     }
   }
   #ifdef HAS_GPS

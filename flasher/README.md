@@ -30,7 +30,8 @@ To install a captive-portal template, click **Upload Evil Portal HTML** and
 choose a non-empty `.html` file smaller than 30,000 bytes. The flasher stores it
 under `/evil_portal/html`, verifies its SHA-256 digest before committing it, and
 asks before replacing a template with the same name. The device refreshes its
-**Select EP HTML File** list as soon as the upload completes.
+**WiFi > Attacks > Evil Portal > Select EP HTML File** list as soon as the
+upload completes.
 
 The SD card can remain installed in the Mini V3. Transfers use the normal USB
 serial connection, preserve folders during batch downloads, and verify every

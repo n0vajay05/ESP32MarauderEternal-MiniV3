@@ -1702,12 +1702,11 @@ void CommandLine::runCommand(String input) {
                                   "AP index"))
             return;
           if ((target_ap_index >= 0) && (target_ap_index < access_points->size())) {
-            for (int index = 0; index < access_points->size(); index++) {
-              AccessPoint access_point = access_points->get(index);
-              access_point.selected = index == target_ap_index;
-              access_points->set(index, access_point);
-            }
+            // Choosing the portal anchor must preserve the other EPDeauth
+            // targets, just as the grouped SSID menu does.
             AccessPoint new_ap = access_points->get(target_ap_index);
+            new_ap.selected = true;
+            access_points->set(target_ap_index, new_ap);
             if (evil_portal_obj.setAP(new_ap.essid))
               evil_portal_obj.setTargetAP(target_ap_index, new_ap.channel);
           }
