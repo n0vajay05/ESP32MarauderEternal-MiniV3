@@ -1,4 +1,4 @@
-# ESP32 Marauder Eternal 1.15.5
+# ESP32 Marauder Eternal 1.15.6
 
 <img width="314" height="314" alt="esp32_marauder_eternal_source" src="https://github.com/user-attachments/assets/79332db4-7a71-423f-a99d-937090bb196f" />
 
@@ -19,7 +19,8 @@ Marauder code base by JustCallMeKoKo and modified for the Marauder Mini V3 only.
 ## Release identity
 
 - Product: `ESP32 Marauder Eternal`
-- Version: `v1.15.5`
+- Version: `v1.15.6`
+- Release notes: [1.15.6](release/RELEASE_NOTES_1.15.6.md)
 - Arduino ESP32 core used for the verified build: `3.3.4`
 - Board target: `esp32:esp32:esp32c5`
 - Options: `FlashSize=8M,PartitionScheme=custom,PSRAM=enabled`
@@ -150,7 +151,7 @@ For a blank board, or when the bootloader and partition table must also be
 restored, use this one firmware payload:
 
 ```text
-release/Marauder_Eternal_1.15.5_MiniV3_ESP32-C5.bin
+release/Marauder_Eternal_1.15.6_MiniV3_ESP32-C5.bin
 ```
 
 It is an 8 MB merged image containing the ESP32-C5 bootloader, partition

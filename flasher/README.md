@@ -2,7 +2,7 @@
 
 Flasher 1.3.5 is a one-click desktop flasher for the Marauder Mini V3 with an
 ESP32-C5 and 8 MB flash. Packaged applications include the verified Marauder
-Eternal 1.15.5 full-device image and also allow the user to choose another
+Eternal 1.15.6 full-device image and also allow the user to choose another
 `.bin`.
 
 ## Use the application

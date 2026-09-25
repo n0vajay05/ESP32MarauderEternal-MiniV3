@@ -1,7 +1,7 @@
-name: Build Mini V3 firmware 1.15.5
+name: Build Mini V3 firmware 1.15.6
 
 env:
-  FIRMWARE_VERSION: "1.15.5"
+  FIRMWARE_VERSION: "1.15.6"
 
 on:
   workflow_dispatch:
