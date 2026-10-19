@@ -32,10 +32,13 @@ targets. `MARAUDER_MINI_V3` is also fixed by the project configuration.
 ## 1.16.1 update
 
 Flasher 1.4.0 adds **Screen Mirror** over USB for presenting the Mini's live
-display on a computer. The viewer provides fullscreen, PNG capture, and
+display on a computer for presenting=type purposes. The viewer provides fullscreen, PNG capture, and
 reconnection controls. Firmware 1.16.1 captures the actual display writes using
 one 32 KiB buffer and sends bounded row updates from a background task. See
 [USB screen mirror](#usb-screen-mirror) for setup and resource details.
+
+<img width="686" height="415" alt="screenshare" src="https://github.com/user-attachments/assets/be713cda-46be-4555-9b6e-36e1f9443e51" />
+<img width="260" height="344" alt="companionapp" src="https://github.com/user-attachments/assets/a24635b1-1d57-447c-aa03-23731d7e5028" />
 
 ## Enhancements carried forward from 1.16.0
 
