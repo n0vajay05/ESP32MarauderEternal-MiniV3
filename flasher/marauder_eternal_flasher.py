@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""One-click firmware flasher for Marauder Eternal Mini V3 devices."""
+"""Desktop flasher, SD browser and USB screen mirror for the Eternal Mini V3."""
 
 from __future__ import annotations
 
@@ -23,6 +23,9 @@ from typing import Callable, Iterable
 
 import tkinter as tk
 from tkinter import filedialog, font as tkfont, messagebox, ttk
+if not __package__ and not getattr(sys, "frozen", False):
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from flasher.screen_mirror import HEIGHT as MIRROR_HEIGHT, WIDTH as MIRROR_WIDTH, MirrorSerialClient
 
 try:
     import serial
@@ -985,6 +988,15 @@ class FlasherApp:
         self.port_by_label: dict[str, PortEntry] = {}
         self.flashing = False
         self.sd_busy = False
+        self.mirror_window: tk.Toplevel | None = None
+        self.mirror_stop = threading.Event()
+        self.mirror_frames: queue.Queue[bytes] = queue.Queue(maxsize=1)
+        self.mirror_running = False
+        self.mirror_closing = False
+        self.quit_after_mirror_close = False
+        self.mirror_rgb: bytes | None = None
+        self.mirror_photo: tk.PhotoImage | None = None
+        self.mirror_fullscreen = False
         self.sd_window: tk.Toplevel | None = None
         self.sd_client: SdSerialClient | None = None
         self.quit_after_sd_close = False
@@ -1248,6 +1260,14 @@ class FlasherApp:
             cursor="hand2",
         )
         self.sd_files_button.pack(fill="x", pady=(8, 0))
+        self.mirror_button = tk.Button(
+            panel, text="Screen Mirror", command=self.open_screen_mirror,
+            background=self.PANEL_ALT, foreground=self.TEXT,
+            activebackground="#2a3744", activeforeground=self.TEXT,
+            disabledforeground="#7c8491", relief="flat",
+            font=("TkDefaultFont", 10, "bold"), padx=16, pady=10, cursor="hand2",
+        )
+        self.mirror_button.pack(fill="x", pady=(8, 0))
         self._label(
             panel,
             textvariable=self.firmware_warning_var,
@@ -1306,7 +1326,7 @@ class FlasherApp:
 
         self._label(
             outer,
-            f"Flasher {APP_VERSION}  •  Firmware flashing and verified SD downloads",
+            f"Flasher {APP_VERSION}  •  Flashing, SD files and USB screen mirroring",
             8,
             "#657384",
         ).pack(anchor="e", pady=(10, 0))
@@ -1351,7 +1371,7 @@ class FlasherApp:
             self.status_var.set("Ready to connect and flash")
 
     def choose_firmware(self) -> None:
-        if self.flashing or self.sd_busy:
+        if self.flashing or self.sd_busy or self._mirror_open():
             return
         selected = filedialog.askopenfilename(
             parent=self.root,
@@ -1383,7 +1403,7 @@ class FlasherApp:
         self._select_firmware(firmware, str(firmware.path))
 
     def use_included_firmware(self) -> None:
-        if self.flashing or self.sd_busy:
+        if self.flashing or self.sd_busy or self._mirror_open():
             return
         try:
             firmware = inspect_firmware(resource_path(), included=True)
@@ -1393,7 +1413,7 @@ class FlasherApp:
         self._select_firmware(firmware, f"Included Marauder Eternal {FIRMWARE_VERSION}")
 
     def refresh_ports(self) -> None:
-        if (self.flashing or self.sd_busy or
+        if (self.flashing or self.sd_busy or self._mirror_open() or
                 (self.sd_window is not None and self.sd_window.winfo_exists())):
             return
         selected_device = self.selected_port()
@@ -1412,6 +1432,7 @@ class FlasherApp:
 
         self.flash_button.configure(state="normal" if self.ports else "disabled")
         self.sd_files_button.configure(state="normal" if self.ports else "disabled")
+        self.mirror_button.configure(state="normal" if self.ports else "disabled")
         if not self.ports:
             self.status_var.set("No serial device detected — connect the device and refresh")
         elif not self.raw_output:
@@ -1421,8 +1442,144 @@ class FlasherApp:
         entry = self.port_by_label.get(self.port_var.get())
         return entry.device if entry else None
 
+    def _mirror_open(self) -> bool:
+        return self.mirror_window is not None and bool(self.mirror_window.winfo_exists())
+
+    def open_screen_mirror(self) -> None:
+        if self.flashing or self.sd_busy or self.sd_window is not None:
+            return
+        if self._mirror_open():
+            self.mirror_window.lift()
+            return
+        if not self.selected_port():
+            messagebox.showerror(APP_NAME, "Select a serial device before opening Screen Mirror.")
+            return
+        window = tk.Toplevel(self.root)
+        self.mirror_window = window
+        self.mirror_closing = False
+        self.mirror_fullscreen = False
+        self.mirror_rgb = None
+        window.title("Marauder Mini — Screen Mirror")
+        window.geometry("640x680")
+        window.minsize(560, 480)
+        window.configure(background=self.BACKGROUND)
+        window.protocol("WM_DELETE_WINDOW", self._close_mirror)
+        window.bind("<F11>", lambda _event: self._toggle_mirror_fullscreen())
+        window.bind("<Escape>", lambda _event: self._toggle_mirror_fullscreen(False))
+        toolbar = tk.Frame(window, background=self.PANEL, padx=12, pady=12)
+        toolbar.pack(fill="x")
+        for label, callback in (("Fullscreen (F11)", self._toggle_mirror_fullscreen),
+                                ("Save PNG", self._save_mirror),
+                                ("Disconnect", self._close_mirror)):
+            tk.Button(toolbar, text=label, command=callback, background=self.PANEL_ALT,
+                      foreground=self.TEXT, relief="flat", padx=10, pady=7).pack(side="left", padx=(0, 8))
+        self.mirror_reconnect = tk.Button(toolbar, text="Reconnect", command=self._start_mirror,
+                                         background=self.ACCENT, foreground="white", relief="flat", padx=10, pady=7)
+        self.mirror_reconnect.pack(side="right")
+        self.mirror_canvas = tk.Canvas(window, background="black", highlightthickness=0)
+        self.mirror_canvas.pack(fill="both", expand=True)
+        self.mirror_canvas.bind("<Configure>", lambda _event: self._render_mirror())
+        self.mirror_status = tk.StringVar(value="Connecting over USB…")
+        tk.Label(window, textvariable=self.mirror_status, background=self.PANEL,
+                 foreground=self.TEXT, anchor="w", padx=14, pady=12,
+                 wraplength=500).pack(fill="x")
+        self._set_flashing_controls(True)
+        self.flashing = False  # The window owns USB; firmware flashing is idle.
+        self._start_mirror()
+
+    def _start_mirror(self) -> None:
+        if self.mirror_running or self.mirror_closing:
+            return
+        port = self.selected_port()
+        if not port:
+            return
+        self.mirror_stop = threading.Event()
+        self.mirror_running = True
+        self.mirror_reconnect.configure(state="disabled")
+        self.mirror_status.set("Connecting over USB…")
+        while not self.mirror_frames.empty():
+            try:
+                self.mirror_frames.get_nowait()
+            except queue.Empty:
+                break
+        threading.Thread(target=self._mirror_worker, args=(port, self.mirror_stop), daemon=True).start()
+
+    def _mirror_worker(self, port: str, stop: threading.Event) -> None:
+        error = ""
+        try:
+            with MirrorSerialClient(port, cancel=stop) as client:
+                self.events.put(("mirror_status", "Live USB • 128 × 128 • Use the Mini’s buttons • F11 fullscreen"))
+                last_update = 0.0
+                needs_publish = False
+                while not stop.is_set():
+                    changed = client.poll()
+                    needs_publish |= changed
+                    now = time.monotonic()
+                    if needs_publish and now - last_update >= .1:
+                        frame = bytes(client.image)
+                        try:
+                            self.mirror_frames.put_nowait(frame)
+                        except queue.Full:
+                            try:
+                                self.mirror_frames.get_nowait()
+                            except queue.Empty:
+                                pass
+                            self.mirror_frames.put_nowait(frame)
+                        last_update = now
+                        needs_publish = False
+                    if not changed:
+                        stop.wait(.04)
+        except Exception as exception:
+            if not stop.is_set():
+                error = str(exception)
+        finally:
+            self.events.put(("mirror_finished", error))
+
+    def _render_mirror(self) -> None:
+        if not self._mirror_open() or self.mirror_rgb is None:
+            return
+        width, height = self.mirror_canvas.winfo_width(), self.mirror_canvas.winfo_height()
+        scale = max(1, min(16, width // MIRROR_WIDTH, height // MIRROR_HEIGHT))
+        original = tk.PhotoImage(data=b"P6\n128 128\n255\n" + self.mirror_rgb, format="PPM")
+        self.mirror_photo = original.zoom(scale)
+        self.mirror_canvas.delete("screen")
+        self.mirror_canvas.create_image(width // 2, height // 2, image=self.mirror_photo, tags="screen")
+
+    def _toggle_mirror_fullscreen(self, enabled: bool | None = None) -> None:
+        if self._mirror_open():
+            self.mirror_fullscreen = not self.mirror_fullscreen if enabled is None else enabled
+            self.mirror_window.attributes("-fullscreen", self.mirror_fullscreen)
+
+    def _save_mirror(self) -> None:
+        if self.mirror_rgb is None:
+            return
+        selected = filedialog.asksaveasfilename(parent=self.mirror_window, title="Save Mini screen",
+                                               defaultextension=".png", filetypes=(("PNG image", "*.png"),))
+        if selected:
+            original = tk.PhotoImage(data=b"P6\n128 128\n255\n" + self.mirror_rgb, format="PPM")
+            original.write(selected, format="png")
+
+    def _close_mirror(self) -> None:
+        if self.mirror_closing:
+            return
+        self.mirror_closing = True
+        self.mirror_status.set("Disconnecting…")
+        self.mirror_stop.set()
+        if not self.mirror_running:
+            self._destroy_mirror()
+            if self.quit_after_mirror_close:
+                self.root.destroy()
+
+    def _destroy_mirror(self) -> None:
+        if self._mirror_open():
+            self.mirror_window.destroy()
+        self.mirror_window = None
+        self.mirror_photo = None
+        self.mirror_rgb = None
+        self._set_flashing_controls(False)
+
     def open_sd_files(self, refresh: bool = True) -> None:
-        if self.flashing or self.sd_busy:
+        if self.flashing or self.sd_busy or self._mirror_open():
             return
         if not self.selected_port():
             messagebox.showerror(APP_NAME, "Select a serial device before browsing SD files.")
@@ -1669,6 +1826,7 @@ class FlasherApp:
         self.sd_files_button.configure(
             state=main_state if self.ports else "disabled"
         )
+        self.mirror_button.configure(state=main_state if self.ports else "disabled")
         if self.sd_window is not None and self.sd_window.winfo_exists():
             sd_state = "disabled" if active else "normal"
             self.sd_refresh_button.configure(state=sd_state)
@@ -1950,9 +2108,10 @@ class FlasherApp:
         self.included_button.configure(state=state)
         self.flash_button.configure(state=state if self.ports else "disabled")
         self.sd_files_button.configure(state=state if self.ports else "disabled")
+        self.mirror_button.configure(state=state if self.ports else "disabled")
 
     def start_flash(self) -> None:
-        if self.flashing or self.sd_busy:
+        if self.flashing or self.sd_busy or self._mirror_open():
             return
         port = self.selected_port()
         if not port:
@@ -2121,8 +2280,27 @@ class FlasherApp:
                     if self.quit_after_sd_close:
                         self.root.destroy()
                         return
+                elif kind == "mirror_status":
+                    if self._mirror_open():
+                        self.mirror_status.set(str(payload))
+                elif kind == "mirror_finished":
+                    self.mirror_running = False
+                    if self.mirror_closing:
+                        self._destroy_mirror()
+                        if self.quit_after_mirror_close:
+                            self.root.destroy()
+                            return
+                    elif self._mirror_open():
+                        self.mirror_status.set(str(payload) or "Disconnected")
+                        self.mirror_reconnect.configure(state="normal")
         except queue.Empty:
             pass
+        if self._mirror_open():
+            try:
+                self.mirror_rgb = self.mirror_frames.get_nowait()
+                self._render_mirror()
+            except queue.Empty:
+                pass
         self.root.after(100, self._drain_events)
 
     def _finish(self, success: bool, message: str) -> None:
@@ -2146,6 +2324,10 @@ class FlasherApp:
                 APP_NAME,
                 "A device operation is still in progress. Wait for it to finish before closing the app.",
             )
+            return
+        if self._mirror_open():
+            self.quit_after_mirror_close = True
+            self._close_mirror()
             return
         if self.sd_window is not None and self.sd_window.winfo_exists():
             if self.sd_client is not None:
@@ -2219,6 +2401,25 @@ def ui_smoke_test() -> int:
             root.destroy()
             raise RuntimeError(f"The SD control {control.cget('text')} is clipped.")
     app._close_sd_files()
+    # Exercise the real mirror window and Tk image renderer without opening a
+    # serial port. Transport and hardware tests are separate from this fixture.
+    app._start_mirror = lambda: None
+    app.open_screen_mirror()
+    root.update()
+    if app.mirror_window is None or not app.mirror_canvas.winfo_exists():
+        raise RuntimeError("The Screen Mirror window did not render.")
+    if str(app.flash_button.cget("state")) != "disabled" or str(app.sd_files_button.cget("state")) != "disabled":
+        raise RuntimeError("Screen Mirror did not lock competing USB controls.")
+    app.mirror_rgb = bytes((255, 0, 0, 0, 255, 0, 0, 0, 255, 255, 255, 255)) * (128 * 128 // 4)
+    app._render_mirror()
+    root.update()
+    if app.mirror_photo is None or app.mirror_photo.width() < 128:
+        raise RuntimeError("Screen Mirror image scaling failed.")
+    app._toggle_mirror_fullscreen(True); root.update()
+    app._toggle_mirror_fullscreen(False); root.update()
+    app._close_mirror(); root.update()
+    if str(app.flash_button.cget("state")) != "normal":
+        raise RuntimeError("Closing Screen Mirror did not restore USB controls.")
     root.destroy()
     print(f"UI SMOKE TEST PASSED ({visible_lines} activity lines visible)")
     return 0

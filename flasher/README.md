@@ -1,8 +1,8 @@
 # Marauder Eternal Flasher
 
-Flasher 1.3.5 is a one-click desktop flasher for the Marauder Mini V3 with an
+Flasher 1.4.0 is a one-click desktop flasher for the Marauder Mini V3 with an
 ESP32-C5 and 8 MB flash. Packaged applications include the verified Marauder
-Eternal 1.16.0 full-device image and also allow the user to choose another
+Eternal 1.16.1 full-device image and also allow the user to choose another
 `.bin`.
 
 ## Use the application
@@ -16,6 +16,25 @@ Eternal 1.16.0 full-device image and also allow the user to choose another
 5. Click **Connect & Flash** once.
 6. Leave the device connected until the progress bar reaches 100% and the app
    reports success.
+
+## Present the Mini's screen
+
+Select the Mini's USB serial device and click **Screen Mirror**. A separate
+window shows the live screen at an enlarged, sharp pixel scale. Use the Mini's
+physical buttons to operate it, **F11** or **Fullscreen** for presentations,
+**Esc** to leave fullscreen, and **Save PNG** to save the native screen image.
+The window can be shared or captured with OBS.
+
+Open the viewer before starting the activity you want to demonstrate. Opening
+USB serial can reset the Mini with some host drivers; the viewer waits for
+startup when needed. It uses the USB cable and does not require WiFi or an IP
+address. Click **Disconnect**
+or close the mirror window before flashing firmware or opening SD Files. **Reconnect**
+resumes after a USB error. The Mini restores normal serial mode automatically
+if the viewer stops responding.
+
+Screen Mirror requires firmware advertising `screen-mirror-v1`; older firmware
+shows an upgrade message. The included current firmware provides that support.
 
 ## Copy files from the SD card
 

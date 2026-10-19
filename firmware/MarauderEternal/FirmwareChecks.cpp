@@ -4,6 +4,7 @@
 #include "FoxHunt.h"
 #include "TrackerDiagnostics.h"
 #include "WiFiScan.h"
+#include "ScreenMirror.h"
 #ifdef HAS_SCREEN
 #include "MenuFunctions.h"
 #endif
@@ -219,4 +220,17 @@ void runTrackerChecks() {
     #endif
   #endif
   Serial.println(ok ? F("SELFTEST findmy PASS") : F("SELFTEST findmy FAIL"));
+}
+
+void runMirrorChecks() {
+  #ifdef HAS_SCREEN
+    extern Display display_obj;
+    extern MenuFunctions menu_function_obj;
+    bool ok = check(marauder::mirror::verifyCapture(display_obj.tft), "mirror pixel, line, fill, sprite, image byte order and rotations");
+    Serial.println(F("MIRROR BLOCKING BEGIN"));
+    delay(6500); // Deliberately longer than the session lease; USB runs independently.
+    Serial.println(F("MIRROR BLOCKING END"));
+    display_obj.init(); menu_function_obj.changeMenu(menu_function_obj.current_menu, true);
+    Serial.println(ok ? F("SELFTEST mirror PASS") : F("SELFTEST mirror FAIL"));
+  #endif
 }

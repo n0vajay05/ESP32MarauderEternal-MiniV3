@@ -808,6 +808,7 @@ void TFT_eSPI::init(uint8_t tc)
 ***************************************************************************************/
 void TFT_eSPI::setRotation(uint8_t m)
 {
+  if (_capture) _capture->rotated(m & 3);
 
   begin_tft_write();
 
@@ -3220,11 +3221,11 @@ void TFT_eSPI::drawChar(int32_t x, int32_t y, uint16_t c, uint32_t color, uint32
 
     for (int8_t j = 0; j < 8; j++) {
       for (int8_t k = 0; k < 5; k++ ) {
-        if (column[k] & mask) {tft_Write_16(color);}
-        else {tft_Write_16(bg);}
+        if (column[k] & mask) {if (_capture) _capture->solid(color, 1); tft_Write_16(color);}
+        else {if (_capture) _capture->solid(bg, 1); tft_Write_16(bg);}
       }
       mask <<= 1;
-      tft_Write_16(bg);
+      if (_capture) _capture->solid(bg, 1); tft_Write_16(bg);
     }
 
     end_tft_write();
@@ -3361,6 +3362,7 @@ void TFT_eSPI::setAddrWindow(int32_t x0, int32_t y0, int32_t w, int32_t h)
 // Chip select stays low, call begin_tft_write first. Use setAddrWindow() from sketches
 void TFT_eSPI::setWindow(int32_t x0, int32_t y0, int32_t x1, int32_t y1)
 {
+  if (_capture) _capture->window(x0, y0, x1, y1);
   //begin_tft_write(); // Must be called before setWindow
   addr_row = 0xFFFF;
   addr_col = 0xFFFF;
@@ -3591,6 +3593,8 @@ void TFT_eSPI::drawPixel(int32_t x, int32_t y, uint32_t color)
   // Range checking
   if ((x < _vpX) || (y < _vpY) ||(x >= _vpW) || (y >= _vpH)) return;
 
+  if (_capture) _capture->pixel(x, y, color);
+
 #ifdef CGRAM_OFFSET
   x+=colstart;
   y+=rowstart;
@@ -3791,6 +3795,7 @@ void TFT_eSPI::drawPixel(int32_t x, int32_t y, uint32_t color)
 ***************************************************************************************/
 void TFT_eSPI::pushColor(uint16_t color)
 {
+  if (_capture) _capture->solid(color, 1);
   begin_tft_write();
 
   SPI_BUSY_CHECK;
@@ -5326,13 +5331,13 @@ int16_t TFT_eSPI::drawChar(uint16_t uniCode, int32_t x, int32_t y, uint8_t font)
           line = pgm_read_byte((uint8_t *) (flash_address + w * i + k) );
           mask = 0x80;
           while (mask && pX) {
-            if (line & mask) {tft_Write_16(textcolor);}
-            else {tft_Write_16(textbgcolor);}
+            if (line & mask) {if (_capture) _capture->solid(textcolor, 1); tft_Write_16(textcolor);}
+            else {if (_capture) _capture->solid(textbgcolor, 1); tft_Write_16(textbgcolor);}
             pX--;
             mask = mask >> 1;
           }
         }
-        if (pX) {tft_Write_16(textbgcolor);}
+        if (pX) {if (_capture) _capture->solid(textbgcolor, 1); tft_Write_16(textbgcolor);}
       }
 
       end_tft_write();
@@ -5381,9 +5386,9 @@ int16_t TFT_eSPI::drawChar(uint16_t uniCode, int32_t x, int32_t y, uint8_t font)
 
             if (ts) {
               tnp = np;
-              while (tnp--) {tft_Write_16(textcolor);}
+              while (tnp--) {if (_capture) _capture->solid(textcolor, 1); tft_Write_16(textcolor);}
             }
-            else {tft_Write_16(textcolor);}
+            else {if (_capture) _capture->solid(textcolor, 1); tft_Write_16(textcolor);}
             px += textsize;
 
             if (px >= (xd + width * textsize)) {

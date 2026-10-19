@@ -29,6 +29,7 @@
 //Standard support
 #include <Arduino.h>
 #include <Print.h>
+#include "TFT_Capture.h"
 #if !defined (TFT_PARALLEL_8_BIT) && !defined (RP2040_PIO_INTERFACE)
   #include <SPI.h>
 #endif
@@ -427,11 +428,14 @@ typedef uint16_t (*getColorCallback)(uint16_t x, uint16_t y);
 
 // Class functions and variables
 class TFT_eSPI : public Print { friend class TFT_eSprite; // Sprite class has access to protected members
+ private:
+  TFT_Capture* _capture = nullptr;
 
  //--------------------------------------- public ------------------------------------//
  public:
 
   TFT_eSPI(int16_t _W = TFT_WIDTH, int16_t _H = TFT_HEIGHT);
+  void setCapture(TFT_Capture* observer) { _capture = observer; }
 
   // init() and begin() are equivalent, begin() included for backwards compatibility
   // Sketch defined tab colour option is for ST7735 displays only

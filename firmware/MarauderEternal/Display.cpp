@@ -1,5 +1,6 @@
 #include "Display.h"
 #include "DisplayLine.h"
+#include "ScreenMirror.h"
 #include "lang_var.h"
 
 #ifdef HAS_SCREEN
@@ -195,6 +196,7 @@ void Display::setCalData(bool landscape) {
 // Function to prepare the display and the menus
 void Display::RunSetup() {
   run_setup = false;
+  marauder::mirror::begin(tft);
 
   // Need to declare new
   display_buffer = new LinkedList<String>();

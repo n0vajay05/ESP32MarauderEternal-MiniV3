@@ -2,6 +2,7 @@
 #include "FirmwareChecks.h"
 #include "DroneRemoteID.h"
 #include "BLEDeviceDetectors.h"
+#include "ScreenMirror.h"
 
 #include <errno.h>
 #include <limits.h>
@@ -283,6 +284,7 @@ void CommandLine::exitSdSession() {
 }
 
 String CommandLine::getSerialInput() {
+  if (marauder::mirror::active()) return marauder::mirror::serialInput();
   String input = "";
 
   if (Serial.available() > 0)
@@ -316,7 +318,7 @@ void CommandLine::main(uint32_t currentTime) {
   if (this->sd_session_active && sd_operation)
     this->showSdSessionStatus("CONNECTED", "Waiting for PC");
 
-  if (input != "")
+  if (input != "" && !input.startsWith("mirror "))
     Serial.print("> ");
 }
 
@@ -534,6 +536,7 @@ void CommandLine::startScanFromCLI(int scan_mode, uint16_t color, const char* sc
 
 void CommandLine::runCommand(String input) {
   if (input == "") return;
+  if (marauder::mirror::command(input.c_str(), this->sd_session_active)) return;
 
   const bool storage_protocol_command =
       input.startsWith("protocolinfo ") || input.startsWith("sdlist ") ||
@@ -547,6 +550,15 @@ void CommandLine::runCommand(String input) {
   else Serial.println("#" + input);
 
   LinkedList<String> cmd_args = this->parseCommand(input, " ");
+
+  if (marauder::mirror::active() &&
+      (cmd_args.get(0) == SD_SESSION_CMD || cmd_args.get(0) == SD_LIST_CMD ||
+       cmd_args.get(0) == SD_GET_CMD || cmd_args.get(0) == SD_PUT_CMD)) {
+    int machine_arg = this->argSearch(&cmd_args, "--machine");
+    String transaction = machine_arg >= 0 && machine_arg + 1 < cmd_args.size() ? cmd_args.get(machine_arg + 1) : "";
+    machineResult(transaction, cmd_args.get(0).c_str(), "error", "MIRROR_ACTIVE");
+    return;
+  }
 
   if (this->sd_session_active &&
       cmd_args.get(0) != PROTOCOL_INFO_CMD &&
@@ -569,6 +581,7 @@ void CommandLine::runCommand(String input) {
     else if (cmd_args.size() >= 2 && cmd_args.get(1) == "remoteid") DroneRemoteID::runChecks();
     else if (cmd_args.size() >= 2 && cmd_args.get(1) == "ibeacon") BLEDeviceDetectors::runIBeaconChecks();
     else if (cmd_args.size() >= 2 && cmd_args.get(1) == "findmy") runTrackerChecks();
+    else if (cmd_args.size() >= 2 && cmd_args.get(1) == "mirror") runMirrorChecks();
     else if (cmd_args.size() >= 2 && cmd_args.get(1) == "gpstracker") runGpsTrackerChecks();
     else if (cmd_args.size() >= 2 && cmd_args.get(1) == "fox") {
       runFoxChecks();
@@ -1082,7 +1095,7 @@ void CommandLine::runCommand(String input) {
           "\"status\":\"success\",\"code\":\"OK\",\"firmware\":\"%s\","
           "\"capabilities\":[\"spiffs-backup\",\"spiffs-backup-status\","
           "\"spiffs-restore\",\"sd-list\",\"sd-download\",\"sd-upload\","
-          "\"sd-session\"],"
+          "\"sd-session\",\"screen-mirror-v1\"],"
           "\"backupPath\":\"/spiffs\"}\n",
           transaction_id.c_str(), version_number.c_str()
         );

@@ -1,8 +1,8 @@
-name: Build desktop flashers 1.3.5
+name: Build desktop flashers 1.4.0
 
 env:
-  FIRMWARE_VERSION: "1.16.0"
-  FLASHER_VERSION: "1.3.5"
+  FIRMWARE_VERSION: "1.16.1"
+  FLASHER_VERSION: "1.4.0"
 
 on:
   workflow_dispatch:
@@ -54,8 +54,27 @@ jobs:
       - name: Bundled self-test
         shell: bash
         run: ./dist/${{ matrix.platform }}/${{ matrix.executable }} --self-test
+      - name: Create package checksum
+        shell: bash
+        env:
+          PACKAGE_DIR: dist/${{ matrix.platform }}
+          PACKAGE_EXECUTABLE: ${{ matrix.executable }}
+        run: |
+          python - <<'PY'
+          import hashlib
+          import os
+          from pathlib import Path
+
+          package = Path(os.environ["PACKAGE_DIR"]) / os.environ["PACKAGE_EXECUTABLE"]
+          digest = hashlib.sha256(package.read_bytes()).hexdigest()
+          package.with_name("SHA256SUMS").write_text(
+              f"{digest}  {package.name}\n", encoding="ascii"
+          )
+          PY
       - uses: actions/upload-artifact@v4
         with:
           name: MarauderEternalFlasher-${{ env.FLASHER_VERSION }}-${{ matrix.platform }}
-          path: dist/${{ matrix.platform }}/${{ matrix.executable }}
+          path: |
+            dist/${{ matrix.platform }}/${{ matrix.executable }}
+            dist/${{ matrix.platform }}/SHA256SUMS
           if-no-files-found: error

@@ -68,3 +68,8 @@ g++ -std=c++17 -Wall -Wextra -Werror \
   "${PROJECT_DIR}/tests/native/test_tracker_diagnostics.cpp" \
   -o "${TEST_DIR}/test_tracker_diagnostics"
 "${TEST_DIR}/test_tracker_diagnostics"
+g++ -std=c++17 -Wall -Wextra -Werror \
+  -I"${PROJECT_DIR}/firmware/MarauderEternal" \
+  "${PROJECT_DIR}/tests/native/test_mirror.cpp" \
+  -o "${TEST_DIR}/test_mirror"
+"${TEST_DIR}/test_mirror"

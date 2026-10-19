@@ -295,6 +295,7 @@ void setup()
     esp_spiram_init();
   #endif
 
+  Serial.setTxBufferSize(1024);
   Serial.begin(115200);
   device_clock_obj.begin();
 

@@ -9,3 +9,4 @@ void runGeofenceChecks(const String& phase);
 void runGpsTrackerChecks();
 void runFoxChecks();
 void runTrackerChecks();
+void runMirrorChecks();
