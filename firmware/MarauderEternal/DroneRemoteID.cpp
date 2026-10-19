@@ -91,8 +91,7 @@ const uint8_t NAN_DESTINATION[] = {0x51, 0x6F, 0x9A, 0x01, 0x00, 0x00};
 const uint8_t NAN_SERVICE_ID[] = {0x88, 0x69, 0x19, 0x9D, 0x92, 0x09};
 
 bool buttonDown(Switches& button) {
-  const bool level = digitalRead(button.getPin());
-  return button.getPullup() ? level == LOW : level == HIGH;
+  return button.isDown();
 }
 
 void releaseButton(Switches& button) {

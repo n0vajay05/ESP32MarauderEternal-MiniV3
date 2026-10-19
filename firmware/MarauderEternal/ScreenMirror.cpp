@@ -1,5 +1,6 @@
 #include "ScreenMirror.h"
 #include "MirrorCanvas.h"
+#include "MirrorInput.h"
 #include "MemoryGuard.h"
 #include "esp_heap_caps.h"
 #include "esp_timer.h"
@@ -56,6 +57,7 @@ class Capture : public TFT_Capture {
 } capture;
 
 void resetSession() {
+  inputState.stop();
   pendingSize = 0;
   Serial.flush(); // At most one bounded packet remains in the TX buffer.
   Serial.updateBaudRate(115200);
@@ -76,10 +78,12 @@ bool hex32(const char* text, uint32_t& result) {
 }
 void status(const char* state, uint32_t requestSession) {
   Serial.printf("@MIRROR:{\"protocol\":1,\"status\":\"%s\",\"session\":%lu,\"baud\":%lu,"
-                "\"width\":128,\"height\":128,\"bufferBytes\":%u,\"memory\":\"%s\","
+                "\"width\":128,\"height\":128,\"input\":true,\"inputLeaseMs\":%lu,\"buttons\":%u,"
+                "\"bufferBytes\":%u,\"memory\":\"%s\","
                 "\"heap\":%lu,\"captureUs\":%llu,\"packets\":%lu,"
                 "\"pollUs\":%llu,\"maxPollUs\":%lu,\"stackFree\":%u,\"upMs\":%lu}\n",
       state, static_cast<unsigned long>(requestSession), static_cast<unsigned long>(kBaud),
+      static_cast<unsigned long>(kInputLeaseMs), unsigned(inputState.mask(millis())),
       canvas.ready() ? unsigned(kBytes) : 0, external ? "psram" : "internal",
       static_cast<unsigned long>(ESP.getFreeHeap()), static_cast<unsigned long long>(captureUs),
       static_cast<unsigned long>(packets), static_cast<unsigned long long>(pollUs),
@@ -148,8 +152,8 @@ void tick() {
 }
 bool command(const char* input, bool storageActive) {
   if (strncmp(input, "mirror ", 7) && strcmp(input, "mirror")) return false;
-  char action[12]{}, token[10]{}, acknowledgement[10]{}, extra[2]{};
-  int count = sscanf(input, "mirror %11s %9s %9s %1s", action, token, acknowledgement, extra);
+  char action[12]{}, token[10]{}, acknowledgement[10]{}, buttons[10]{}, extra[2]{};
+  int count = sscanf(input, "mirror %11s %9s %9s %9s %1s", action, token, acknowledgement, buttons, extra);
   uint32_t requested = 0, ack = 0;
   if (count == 1 && !strcmp(action, "status")) { status(canvas.ready() ? streaming ? "active" : "available" : "no-memory", session); return true; }
   if (count < 2 || !hex32(token, requested) || !requested) { status("invalid-request", 0); return true; }
@@ -159,6 +163,7 @@ bool command(const char* input, bool storageActive) {
     if (streaming && session != requested) { status("busy", requested); return true; }
     session = requested; sequence = 0; pendingSize = 0; packets = 0;
     lastPoll = millis();
+    inputState.start(lastPoll);
     xSemaphoreTake(mutex, portMAX_DELAY); canvas.invalidate(); queued = false; xSemaphoreGive(mutex);
     status("ready", requested); Serial.flush();
     Serial.updateBaudRate(kBaud); streaming = true;
@@ -167,8 +172,13 @@ bool command(const char* input, bool storageActive) {
   }
   if (!streaming || session != requested) { status("session-expired", requested); return true; }
   if (!strcmp(action, "stop") && count == 2) { status("stopped", requested); resetSession(); return true; }
-  if (strcmp(action, "poll") || count != 3 || !hex32(acknowledgement, ack)) { status("invalid-request", requested); return true; }
+  uint32_t keys = 0;
+  if (strcmp(action, "poll") || (count != 3 && count != 4) || !hex32(acknowledgement, ack) ||
+      (count == 4 && (!hex32(buttons, keys) || (keys & ~uint32_t(kButtonMask))))) {
+    status("invalid-request", requested); return true;
+  }
   lastPoll = millis();
+  inputState.update(keys, lastPoll);
   const int64_t pollStart = esp_timer_get_time();
   // Retransmit until acknowledged. A lost/corrupt packet never silently clears
   // a row, and a slow viewer cannot grow a queue on the Mini.

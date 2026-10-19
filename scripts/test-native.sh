@@ -73,3 +73,11 @@ g++ -std=c++17 -Wall -Wextra -Werror \
   "${PROJECT_DIR}/tests/native/test_mirror.cpp" \
   -o "${TEST_DIR}/test_mirror"
 "${TEST_DIR}/test_mirror"
+g++ -std=c++17 -Wall -Wextra -Werror \
+  -I"${PROJECT_DIR}/tests/native/stubs" \
+  -I"${PROJECT_DIR}/firmware/MarauderEternal" \
+  "${PROJECT_DIR}/tests/native/test_mirror_input.cpp" \
+  "${PROJECT_DIR}/firmware/MarauderEternal/Switches.cpp" \
+  "${PROJECT_DIR}/firmware/MarauderEternal/MirrorInput.cpp" \
+  -o "${TEST_DIR}/test_mirror_input"
+"${TEST_DIR}/test_mirror_input"

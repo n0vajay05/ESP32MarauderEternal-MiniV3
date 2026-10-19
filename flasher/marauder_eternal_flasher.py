@@ -25,7 +25,7 @@ import tkinter as tk
 from tkinter import filedialog, font as tkfont, messagebox, ttk
 if not __package__ and not getattr(sys, "frozen", False):
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from flasher.screen_mirror import HEIGHT as MIRROR_HEIGHT, WIDTH as MIRROR_WIDTH, MirrorSerialClient
+from flasher.screen_mirror import HEIGHT as MIRROR_HEIGHT, WIDTH as MIRROR_WIDTH, KEY_BUTTONS, MirrorKeyboard, MirrorSerialClient
 
 try:
     import serial
@@ -997,6 +997,9 @@ class FlasherApp:
         self.mirror_rgb: bytes | None = None
         self.mirror_photo: tk.PhotoImage | None = None
         self.mirror_fullscreen = False
+        self.mirror_keyboard = MirrorKeyboard()
+        self.mirror_input_active = False
+        self.mirror_releases: dict[str, str] = {}
         self.sd_window: tk.Toplevel | None = None
         self.sd_client: SdSerialClient | None = None
         self.quit_after_sd_close = False
@@ -1466,6 +1469,9 @@ class FlasherApp:
         window.protocol("WM_DELETE_WINDOW", self._close_mirror)
         window.bind("<F11>", lambda _event: self._toggle_mirror_fullscreen())
         window.bind("<Escape>", lambda _event: self._toggle_mirror_fullscreen(False))
+        window.bind("<KeyPress>", self._mirror_key_press)
+        window.bind("<KeyRelease>", self._mirror_key_release)
+        window.bind("<FocusOut>", lambda _event: self._release_mirror_keys())
         toolbar = tk.Frame(window, background=self.PANEL, padx=12, pady=12)
         toolbar.pack(fill="x")
         for label, callback in (("Fullscreen (F11)", self._toggle_mirror_fullscreen),
@@ -1476,9 +1482,11 @@ class FlasherApp:
         self.mirror_reconnect = tk.Button(toolbar, text="Reconnect", command=self._start_mirror,
                                          background=self.ACCENT, foreground="white", relief="flat", padx=10, pady=7)
         self.mirror_reconnect.pack(side="right")
-        self.mirror_canvas = tk.Canvas(window, background="black", highlightthickness=0)
+        self.mirror_canvas = tk.Canvas(window, background="black", highlightthickness=0, takefocus=True)
         self.mirror_canvas.pack(fill="both", expand=True)
         self.mirror_canvas.bind("<Configure>", lambda _event: self._render_mirror())
+        self.mirror_canvas.bind("<Button-1>", lambda _event: self.mirror_canvas.focus_set())
+        window.after_idle(self.mirror_canvas.focus_set)
         self.mirror_status = tk.StringVar(value="Connecting over USB…")
         tk.Label(window, textvariable=self.mirror_status, background=self.PANEL,
                  foreground=self.TEXT, anchor="w", padx=14, pady=12,
@@ -1493,6 +1501,8 @@ class FlasherApp:
         port = self.selected_port()
         if not port:
             return
+        self._release_mirror_keys()
+        self.mirror_input_active = False
         self.mirror_stop = threading.Event()
         self.mirror_running = True
         self.mirror_reconnect.configure(state="disabled")
@@ -1504,15 +1514,56 @@ class FlasherApp:
                 break
         threading.Thread(target=self._mirror_worker, args=(port, self.mirror_stop), daemon=True).start()
 
+    def _mirror_key_press(self, event: tk.Event) -> str | None:
+        name = event.keysym.lower()
+        if (name not in KEY_BUTTONS or not self.mirror_input_active or
+                not self.mirror_running or self.mirror_closing or not self._mirror_open()):
+            return None
+        focus = self.mirror_window.focus_get()
+        if focus is None or focus.winfo_toplevel() != self.mirror_window:
+            return None
+        if event.state & (0x0004 | 0x0008 | 0x0040 | 0x0080 | 0x20000):
+            return None  # Leave Control/Alt/Command shortcuts to the desktop.
+        pending = self.mirror_releases.pop(name, None)
+        if pending is not None:
+            self.root.after_cancel(pending)
+        self.mirror_keyboard.key(name, True)
+        return "break"
+
+    def _mirror_key_release(self, event: tk.Event) -> str | None:
+        name = event.keysym.lower()
+        if name not in KEY_BUTTONS or not self._mirror_open():
+            return None
+        # X11 may synthesize release/press pairs for an autorepeated held key.
+        # Defer its release so the matching press can cancel it before delivery.
+        pending = self.mirror_releases.pop(name, None)
+        if pending is not None:
+            self.root.after_cancel(pending)
+        self.mirror_releases[name] = self.root.after_idle(
+            lambda: self._finish_mirror_key_release(name))
+        return "break" if self.mirror_input_active else None
+
+    def _finish_mirror_key_release(self, name: str) -> None:
+        self.mirror_releases.pop(name, None)
+        self.mirror_keyboard.key(name, False)
+
+    def _release_mirror_keys(self) -> None:
+        for pending in self.mirror_releases.values():
+            self.root.after_cancel(pending)
+        self.mirror_releases.clear()
+        self.mirror_keyboard.clear()
+
     def _mirror_worker(self, port: str, stop: threading.Event) -> None:
         error = ""
         try:
             with MirrorSerialClient(port, cancel=stop) as client:
-                self.events.put(("mirror_status", "Live USB • 128 × 128 • Use the Mini’s buttons • F11 fullscreen"))
+                self.events.put(("mirror_connected", client.input_supported))
+                controls = "Arrows + C control the Mini" if client.input_supported else "Use the Mini’s buttons; update firmware for keyboard controls"
+                self.events.put(("mirror_status", f"Live USB • 128 × 128 • {controls} • F11 fullscreen"))
                 last_update = 0.0
                 needs_publish = False
                 while not stop.is_set():
-                    changed = client.poll()
+                    changed = client.poll(self.mirror_keyboard.sample if client.input_supported else 0)
                     needs_publish |= changed
                     now = time.monotonic()
                     if needs_publish and now - last_update >= .1:
@@ -1533,6 +1584,7 @@ class FlasherApp:
             if not stop.is_set():
                 error = str(exception)
         finally:
+            self.mirror_keyboard.clear()
             self.events.put(("mirror_finished", error))
 
     def _render_mirror(self) -> None:
@@ -1553,6 +1605,7 @@ class FlasherApp:
     def _save_mirror(self) -> None:
         if self.mirror_rgb is None:
             return
+        self._release_mirror_keys()
         selected = filedialog.asksaveasfilename(parent=self.mirror_window, title="Save Mini screen",
                                                defaultextension=".png", filetypes=(("PNG image", "*.png"),))
         if selected:
@@ -1563,6 +1616,8 @@ class FlasherApp:
         if self.mirror_closing:
             return
         self.mirror_closing = True
+        self.mirror_input_active = False
+        self._release_mirror_keys()
         self.mirror_status.set("Disconnecting…")
         self.mirror_stop.set()
         if not self.mirror_running:
@@ -1571,6 +1626,8 @@ class FlasherApp:
                 self.root.destroy()
 
     def _destroy_mirror(self) -> None:
+        self.mirror_input_active = False
+        self._release_mirror_keys()
         if self._mirror_open():
             self.mirror_window.destroy()
         self.mirror_window = None
@@ -2280,10 +2337,14 @@ class FlasherApp:
                     if self.quit_after_sd_close:
                         self.root.destroy()
                         return
+                elif kind == "mirror_connected":
+                    self.mirror_input_active = bool(payload) and not self.mirror_closing
                 elif kind == "mirror_status":
                     if self._mirror_open():
                         self.mirror_status.set(str(payload))
                 elif kind == "mirror_finished":
+                    self.mirror_input_active = False
+                    self._release_mirror_keys()
                     self.mirror_running = False
                     if self.mirror_closing:
                         self._destroy_mirror()
@@ -2417,7 +2478,40 @@ def ui_smoke_test() -> int:
         raise RuntimeError("Screen Mirror image scaling failed.")
     app._toggle_mirror_fullscreen(True); root.update()
     app._toggle_mirror_fullscreen(False); root.update()
+    app.mirror_canvas.focus_force(); root.update()
+    app.mirror_canvas.event_generate("<KeyPress-Down>"); root.update()
+    if app.mirror_keyboard.sample() != 0:
+        raise RuntimeError("Keyboard control was enabled without an active mirror session.")
+    app.mirror_running = app.mirror_input_active = True
+    app.mirror_canvas.event_generate("<KeyPress-Down>"); root.update()
+    if app.mirror_keyboard.sample(0) != 2:
+        raise RuntimeError("Mirror arrow key binding failed.")
+    app.mirror_canvas.event_generate("<KeyRelease-Down>")
+    app.mirror_canvas.event_generate("<KeyPress-Down>")
+    root.update()
+    if app.mirror_keyboard.sample(1) != 2:
+        raise RuntimeError("Mirror held-key autorepeat handling failed.")
+    app.mirror_canvas.event_generate("<KeyRelease-Down>"); root.update()
+    if app.mirror_keyboard.sample(2) != 0:
+        raise RuntimeError("Mirror key release binding failed.")
+    app.mirror_canvas.event_generate("<KeyPress-C>"); root.update()
+    if app.mirror_keyboard.sample(3) != 16:
+        raise RuntimeError("Mirror center key binding failed.")
+    root.focus_force(); root.update()
+    if app.mirror_keyboard.sample(3.001) != 0:
+        raise RuntimeError("Mirror keys were not released on focus loss.")
+    app.mirror_canvas.focus_force(); root.update()
+    for modifier in (4, 8, 64, 128, 0x20000):
+        app.mirror_canvas.event_generate("<KeyPress-c>", state=modifier); root.update()
+        if app.mirror_keyboard.sample(4) != 0:
+            raise RuntimeError("Mirror intercepted a desktop modifier shortcut.")
+    app.mirror_canvas.event_generate("<KeyPress-c>"); root.update()
+    if app.mirror_keyboard.sample(5) != 16:
+        raise RuntimeError("Mirror key input did not recover after focus loss.")
+    app.mirror_running = False  # This fixture has no serial worker to stop.
     app._close_mirror(); root.update()
+    if app.mirror_input_active or app.mirror_keyboard.sample(5.001):
+        raise RuntimeError("Mirror keyboard state survived disconnect.")
     if str(app.flash_button.cget("state")) != "normal":
         raise RuntimeError("Closing Screen Mirror did not restore USB controls.")
     root.destroy()

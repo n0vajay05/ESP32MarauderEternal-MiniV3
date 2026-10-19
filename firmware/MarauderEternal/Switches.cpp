@@ -1,4 +1,5 @@
 #include "Switches.h"
+#include "MirrorInput.h"
 
 Switches::Switches() {
 	this->pin = 0;
@@ -13,8 +14,9 @@ Switches::Switches() {
 	return;
 }
 
-Switches::Switches(int pin, uint32_t hold_lim, bool pullup) {
+Switches::Switches(int pin, uint32_t hold_lim, bool pullup, uint8_t remote_mask) {
 	this->pin = pin;
+	this->remote_mask = remote_mask;
 	this->pullup = pullup;
 	this->pressed = false;
 	this->hold_lim = hold_lim;
@@ -42,14 +44,12 @@ bool Switches::isHeld() {
 }
 
 bool Switches::getButtonState() {
-	int buttonState = digitalRead(this->pin);
-	
-	if ((this->pullup) && (buttonState == LOW))
-		return true;
-	else if ((!this->pullup) && (buttonState == HIGH))
-		return true;
-	else
-		return false;
+	return this->isDown();
+}
+
+bool Switches::isDown() {
+	const bool physical = digitalRead(this->pin) == (this->pullup ? LOW : HIGH);
+	return physical || (marauder::mirror::inputState.mask(millis()) & this->remote_mask);
 }
 
 bool Switches::justPressed() {

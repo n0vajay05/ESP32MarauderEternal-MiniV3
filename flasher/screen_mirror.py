@@ -13,6 +13,8 @@ import struct
 import time
 import threading
 from dataclasses import dataclass
+from collections import deque
+from typing import Callable
 
 import serial
 
@@ -21,6 +23,51 @@ HEADER = struct.Struct("<4sBBIIBBH")
 WIDTH = HEIGHT = 128
 MAX_PACKET = 278
 CAPABILITY = "screen-mirror-v1"
+KEY_BUTTONS = {"up": 1, "down": 2, "left": 4, "right": 8, "c": 16}
+
+
+class MirrorKeyboard:
+    """Bounded key transitions shared by Tk and the serial worker.
+
+    Stretch very short taps and releases to cover device polling/debounce.
+    Focus loss bypasses the queue and releases everything immediately.
+    """
+    MIN_STATE_SECONDS = .06
+    MAX_PENDING = 32
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._held = 0
+        self._output = 0
+        self._pending: deque[int] = deque()
+        self._until = 0.0
+
+    def key(self, name: str, down: bool) -> None:
+        bit = KEY_BUTTONS.get(name.lower(), 0)
+        if not bit:
+            return
+        with self._lock:
+            held = (self._held | bit) if down else (self._held & ~bit)
+            if held == self._held:
+                return  # OS autorepeat must not become extra button presses.
+            self._held = held
+            if len(self._pending) >= self.MAX_PENDING:
+                self._pending.clear()
+            self._pending.append(held)
+
+    def sample(self, now: float | None = None) -> int:
+        now = time.monotonic() if now is None else now
+        with self._lock:
+            if self._pending and now >= self._until:
+                self._output = self._pending.popleft()
+                self._until = now + self.MIN_STATE_SECONDS
+            return self._output
+
+    def clear(self) -> None:
+        with self._lock:
+            self._held = self._output = 0
+            self._pending.clear()
+            self._until = 0.0
 
 
 class MirrorError(RuntimeError):
@@ -114,6 +161,7 @@ class MirrorSerialClient:
         self.rows = 0
         self.info: dict[str, object] = {}
         self.started = False
+        self.input_supported = False
         self.cancel = cancel or threading.Event()
 
     def _send(self, text: str) -> None:
@@ -178,6 +226,7 @@ class MirrorSerialClient:
             if (message.get("protocol"), message.get("width"), message.get("height"), message.get("baud")) != (1, WIDTH, HEIGHT, 921600):
                 raise MirrorError("The Mini returned an unsupported mirror format.")
             self.info = message
+            self.input_supported = message.get("input") is True
             self.connection.baudrate = 921600
             self.started = True
             return self
@@ -185,11 +234,15 @@ class MirrorSerialClient:
             self.close()
             raise
 
-    def poll(self) -> bool:
+    def poll(self, buttons: int | Callable[[], int] = 0) -> bool:
         if not self.started:
             raise MirrorError("Screen Mirror is not connected.")
         for _ in range(3):
-            self._send(f"mirror poll {self.session:08x} {self.sequence:08x}")
+            state = buttons() if callable(buttons) else buttons
+            if not isinstance(state, int) or not 0 <= state <= 31:
+                raise ValueError("Invalid mirror button state.")
+            keys = f" {state:08x}" if self.input_supported else ""
+            self._send(f"mirror poll {self.session:08x} {self.sequence:08x}{keys}")
             deadline = time.monotonic() + .4
             while time.monotonic() < deadline:
                 if self.cancel.is_set():
@@ -228,6 +281,7 @@ class MirrorSerialClient:
             except (OSError, serial.SerialException, MirrorError):
                 pass
             self.started = False
+            self.input_supported = False
         if self.owns_connection:
             self.connection.close()
             self.connection = None

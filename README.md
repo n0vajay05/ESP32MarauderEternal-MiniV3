@@ -1,4 +1,4 @@
-# ESP32 Marauder Eternal 1.16.1
+# ESP32 Marauder Eternal 1.16.2
 
 <img width="314" height="314" alt="esp32_marauder_eternal_source" src="https://github.com/user-attachments/assets/79332db4-7a71-423f-a99d-937090bb196f" />
 
@@ -19,9 +19,9 @@ Marauder code base by JustCallMeKoKo and modified for the Marauder Mini V3 only.
 ## Release identity
 
 - Product: `ESP32 Marauder Eternal`
-- Version: `v1.16.1`
-- Desktop flasher: `1.4.0`, including firmware `1.16.1`
-- Release notes: [1.16.1](release/RELEASE_NOTES_1.16.1.md)
+- Version: `v1.16.2`
+- Desktop flasher: `1.5.0`, including firmware `1.16.2`
+- Release notes: [1.16.2](release/RELEASE_NOTES_1.16.2.md)
 - Arduino ESP32 core used for the verified build: `3.3.4`
 - Board target: `esp32:esp32:esp32c5`
 - Options: `FlashSize=8M,PartitionScheme=custom,PSRAM=enabled`
@@ -29,12 +29,17 @@ Marauder code base by JustCallMeKoKo and modified for the Marauder Mini V3 only.
 The source contains a compile-time guard that rejects non-ESP32-C5 board
 targets. `MARAUDER_MINI_V3` is also fixed by the project configuration.
 
-## 1.16.1 update
+## 1.16.2 update
 
-Flasher 1.4.0 adds **Screen Mirror** over USB for presenting the Mini's live
-display on a computer for presenting=type purposes. The viewer provides fullscreen, PNG capture, and
-reconnection controls. Firmware 1.16.1 captures the actual display writes using
-one 32 KiB buffer and sends bounded row updates from a background task. See
+Firmware 1.16.2 and Flasher 1.5.0 add **arrow-key** and **C** controls to the USB
+Screen Mirror introduced in [1.16.1](release/RELEASE_NOTES_1.16.1.md). Keyboard
+controls are available only while mirroring is active and the viewer has focus.
+Held keys reproduce the Mini's button behavior; focus loss or disconnect
+releases all virtual buttons. Physical controls remain usable.
+
+The viewer retains fullscreen, PNG capture, and reconnection controls. The Mini
+captures actual display writes using one 32 KiB buffer and sends bounded row
+updates from a background task. See
 [USB screen mirror](#usb-screen-mirror) for setup and resource details.
 
 <img width="686" height="415" alt="screenshare" src="https://github.com/user-attachments/assets/be713cda-46be-4555-9b6e-36e1f9443e51" />
@@ -220,7 +225,7 @@ For a blank board, or when the bootloader and partition table must also be
 restored, use this one firmware payload:
 
 ```text
-release/Marauder_Eternal_1.16.1_MiniV3_ESP32-C5.bin
+release/Marauder_Eternal_1.16.2_MiniV3_ESP32-C5.bin
 ```
 
 It is an 8 MB merged image containing the ESP32-C5 bootloader, partition
@@ -302,9 +307,14 @@ python3 scripts/package_release.py --verify
 ## USB screen mirror
 
 Connect the Mini with a USB data cable, select it in the desktop flasher, and
-click **Screen Mirror**. The separate viewer enlarges the Mini's live display;
-operate the Mini with its own buttons. Use **Fullscreen** or **F11** for
-presentations, **Esc** to leave fullscreen, and **Save PNG** to capture an image.
+click **Screen Mirror**. The separate viewer enlarges the Mini's live display.
+While the viewer has keyboard focus, use the **arrow keys** for the directional
+buttons and **C** for Center/select. Holding a key reproduces the button's hold
+behavior; the physical buttons remain usable. Keyboard controls are available
+only during an active mirror connection. Switching focus, opening Save PNG, or
+disconnecting releases the virtual buttons. Click the screen to give it focus.
+Use **Fullscreen** or **F11** for presentations, **Esc** to leave fullscreen,
+and **Save PNG** to capture an image.
 OBS and screen-sharing software can capture the viewer window.
 
 The viewer uses USB serial. It needs no WiFi connection, browser, or IP address.
@@ -315,6 +325,9 @@ releases the serial port and restores its normal baud rate; a lost connection
 also expires automatically. Flashing and SD Files are unavailable while the
 viewer owns the port. Older firmware without the mirror capability displays
 an upgrade message; install the included current firmware first.
+Firmware with mirroring but without `screen-mirror-input-v1` remains viewable
+with its physical buttons; the viewer identifies that keyboard support needs
+a firmware update.
 
 The Mini retains one 32 KiB RGB565 shadow of the actual panel writes, preferably
 in PSRAM, so connecting does not require a redraw of the active screen. A
@@ -323,7 +336,9 @@ operation. Each USB packet contains at most one row (278 bytes including its
 header and CRC), with compression when useful and acknowledgement/retry for
 corrupt packets. There is no frame queue on the Mini. The desktop keeps only
 the latest pending image. The USB session negotiates 921600 baud and returns to
-115200 on disconnect or timeout.
+115200 on disconnect or timeout. Keyboard state travels in those same
+session-bound row requests, with a 600 ms input lease that releases keys if
+updates stop.
 
 `selftest mirror` checks physical display capture paths with synthetic graphics
 and deliberately blocks the foreground for 6.5 seconds to exercise background

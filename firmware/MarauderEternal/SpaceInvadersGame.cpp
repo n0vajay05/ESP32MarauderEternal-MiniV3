@@ -84,8 +84,7 @@ const uint16_t ALIEN_COLORS[ALIEN_ROWS] = {
     TFT_RED, TFT_ORANGE, TFT_YELLOW, TFT_GREEN};
 
 bool buttonDown(Switches& button) {
-  const bool level = digitalRead(button.getPin());
-  return button.getPullup() ? level == LOW : level == HIGH;
+  return button.isDown();
 }
 
 void releaseButton(Switches& button) {

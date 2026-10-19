@@ -83,8 +83,7 @@ const uint16_t BRICK_COLORS[BRICK_ROWS] = {
     TFT_RED, TFT_ORANGE, TFT_YELLOW, TFT_GREEN, TFT_CYAN};
 
 bool buttonDown(Switches& button) {
-  const bool level = digitalRead(button.getPin());
-  return button.getPullup() ? level == LOW : level == HIGH;
+  return button.isDown();
 }
 
 void releaseButton(Switches& button) {

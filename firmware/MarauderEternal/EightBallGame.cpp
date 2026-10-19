@@ -77,8 +77,7 @@ const uint16_t BALL_COLORS[BALL_COUNT] = {
     TFT_ORANGE, TFT_GREEN, TFT_MAROON, TFT_BLACK};
 
 bool buttonDown(Switches& button) {
-  const bool level = digitalRead(button.getPin());
-  return button.getPullup() ? level == LOW : level == HIGH;
+  return button.isDown();
 }
 
 void releaseButton(Switches& button) {

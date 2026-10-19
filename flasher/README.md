@@ -1,8 +1,8 @@
 # Marauder Eternal Flasher
 
-Flasher 1.4.0 is a one-click desktop flasher for the Marauder Mini V3 with an
+Flasher 1.5.0 is a one-click desktop flasher for the Marauder Mini V3 with an
 ESP32-C5 and 8 MB flash. Packaged applications include the verified Marauder
-Eternal 1.16.1 full-device image and also allow the user to choose another
+Eternal 1.16.2 full-device image and also allow the user to choose another
 `.bin`.
 
 ## Use the application
@@ -20,8 +20,12 @@ Eternal 1.16.1 full-device image and also allow the user to choose another
 ## Present the Mini's screen
 
 Select the Mini's USB serial device and click **Screen Mirror**. A separate
-window shows the live screen at an enlarged, sharp pixel scale. Use the Mini's
-physical buttons to operate it, **F11** or **Fullscreen** for presentations,
+window shows the live screen at an enlarged, sharp pixel scale. While that
+window has focus, use **arrow keys** for the Mini's directional buttons and
+**C** for Center/select; held keys support the existing button hold behavior.
+The physical buttons remain usable. Keyboard input is enabled only during an
+active mirror connection and releases on focus loss or disconnect. Click the
+screen to give it focus. Use **F11** or **Fullscreen** for presentations,
 **Esc** to leave fullscreen, and **Save PNG** to save the native screen image.
 The window can be shared or captured with OBS.
 
@@ -35,6 +39,8 @@ if the viewer stops responding.
 
 Screen Mirror requires firmware advertising `screen-mirror-v1`; older firmware
 shows an upgrade message. The included current firmware provides that support.
+Keyboard control additionally requires `screen-mirror-input-v1`; firmware with
+the original mirror support remains viewable using the Mini's physical buttons.
 
 ## Copy files from the SD card
 

@@ -42,8 +42,7 @@ constexpr uint16_t MINI_UI_MUTED = 0xA514;
 constexpr uint16_t MINI_UI_DANGER = TFT_RED;
 
 bool miniMenuButtonDown(Switches& button) {
-  const bool level = digitalRead(button.getPin());
-  return button.getPullup() ? level == LOW : level == HIGH;
+  return button.isDown();
 }
 
 TFT_eSPI* mini_ui_render_target = nullptr;

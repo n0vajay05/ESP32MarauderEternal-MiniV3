@@ -1,8 +1,8 @@
-name: Build desktop flashers 1.4.0
+name: Build desktop flashers 1.5.0
 
 env:
-  FIRMWARE_VERSION: "1.16.1"
-  FLASHER_VERSION: "1.4.0"
+  FIRMWARE_VERSION: "1.16.2"
+  FLASHER_VERSION: "1.5.0"
 
 on:
   workflow_dispatch:

@@ -68,8 +68,7 @@ const char* detectorTitle(DetectorType detector) {
 }
 
 bool buttonDown(Switches& button) {
-  const bool level = digitalRead(button.getPin());
-  return button.getPullup() ? level == LOW : level == HIGH;
+  return button.isDown();
 }
 
 void releaseButton(Switches& button) {

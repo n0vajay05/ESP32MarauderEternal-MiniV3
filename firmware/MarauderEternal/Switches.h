@@ -16,16 +16,18 @@ class Switches {
 		bool pullup;
 		
 		bool pressed;
+		uint8_t remote_mask = 0;
 		
 		bool getButtonState();
 		
 	public:
 		Switches();
 		
-		Switches(int pin, uint32_t hold_lim, bool pullup);
+		Switches(int pin, uint32_t hold_lim, bool pullup, uint8_t remote_mask = 0);
 		
 		int getPin();
 		bool getPullup();
+		bool isDown();
 		
 		bool justPressed();
 		bool justReleased();

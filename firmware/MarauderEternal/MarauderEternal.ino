@@ -52,21 +52,22 @@ https://www.online-utility.org/image/convert/to/XBM
 
 #ifdef HAS_BUTTONS
   #include "Switches.h"
+  #include "MirrorInput.h"
   
   #if (U_BTN >= 0)
-    Switches u_btn = Switches(U_BTN, 1000, U_PULL);
+    Switches u_btn = Switches(U_BTN, 1000, U_PULL, marauder::mirror::Up);
   #endif
   #if (D_BTN >= 0)
-    Switches d_btn = Switches(D_BTN, 1000, D_PULL);
+    Switches d_btn = Switches(D_BTN, 1000, D_PULL, marauder::mirror::Down);
   #endif
   #if (L_BTN >= 0)
-    Switches l_btn = Switches(L_BTN, 1000, L_PULL);
+    Switches l_btn = Switches(L_BTN, 1000, L_PULL, marauder::mirror::Left);
   #endif
   #if (R_BTN >= 0)
-    Switches r_btn = Switches(R_BTN, 1000, R_PULL);
+    Switches r_btn = Switches(R_BTN, 1000, R_PULL, marauder::mirror::Right);
   #endif
   #if (C_BTN >= 0)
-    Switches c_btn = Switches(C_BTN, 1000, C_PULL);
+    Switches c_btn = Switches(C_BTN, 1000, C_PULL, marauder::mirror::Center);
   #endif
 
 #endif

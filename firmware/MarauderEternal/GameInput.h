@@ -10,8 +10,7 @@ constexpr uint16_t DEBOUNCE_MS = 25;
 constexpr uint16_t HOLD_MS = 1000;
 
 inline bool isDown(Switches& button) {
-  const bool level = digitalRead(button.getPin());
-  return button.getPullup() ? level == LOW : level == HIGH;
+  return button.isDown();
 }
 
 // A menu invokes a game on the same button edge the game may use. Wait for a

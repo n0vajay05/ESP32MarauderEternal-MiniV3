@@ -299,8 +299,7 @@ void CommandLine::main(uint32_t currentTime) {
     if (this->sd_session_active)
       c_btn.justPressed();
     if (this->sd_session_active && c_btn.isHeld()) {
-      while (digitalRead(c_btn.getPin()) ==
-             (c_btn.getPullup() ? LOW : HIGH))
+      while (c_btn.isDown())
         delay(10);
       this->exitSdSession();
       Serial.println(F("USB SD mode closed from device controls"));
@@ -1095,7 +1094,7 @@ void CommandLine::runCommand(String input) {
           "\"status\":\"success\",\"code\":\"OK\",\"firmware\":\"%s\","
           "\"capabilities\":[\"spiffs-backup\",\"spiffs-backup-status\","
           "\"spiffs-restore\",\"sd-list\",\"sd-download\",\"sd-upload\","
-          "\"sd-session\",\"screen-mirror-v1\"],"
+          "\"sd-session\",\"screen-mirror-v1\",\"screen-mirror-input-v1\"],"
           "\"backupPath\":\"/spiffs\"}\n",
           transaction_id.c_str(), version_number.c_str()
         );

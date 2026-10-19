@@ -489,8 +489,7 @@ volatile uint8_t scanChannel = 11;
 portMUX_TYPE resultMux = portMUX_INITIALIZER_UNLOCKED;
 
 bool buttonDown(Switches& button) {
-  const bool level = digitalRead(button.getPin());
-  return button.getPullup() ? level == LOW : level == HIGH;
+  return button.isDown();
 }
 
 void releaseButton(Switches& button) {

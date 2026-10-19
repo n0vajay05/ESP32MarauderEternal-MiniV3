@@ -529,7 +529,7 @@ void showStatus(const char* title, const String& first = "", const String& secon
 
 void releaseCenterButton() {
 #if defined(HAS_BUTTONS) && (C_BTN >= 0)
-  while (c_btn.getPullup() ? digitalRead(c_btn.getPin()) == LOW : digitalRead(c_btn.getPin()) == HIGH) {
+  while (c_btn.isDown()) {
     c_btn.justPressed();
     delay(10);
   }
@@ -540,14 +540,14 @@ void releaseCenterButton() {
 void releaseNavigationButtons() {
   releaseCenterButton();
 #if defined(HAS_BUTTONS) && (U_BTN >= 0)
-  while (u_btn.getPullup() ? digitalRead(u_btn.getPin()) == LOW : digitalRead(u_btn.getPin()) == HIGH) {
+  while (u_btn.isDown()) {
     u_btn.justPressed();
     delay(10);
   }
   u_btn.justPressed();
 #endif
 #if defined(HAS_BUTTONS) && (D_BTN >= 0)
-  while (d_btn.getPullup() ? digitalRead(d_btn.getPin()) == LOW : digitalRead(d_btn.getPin()) == HIGH) {
+  while (d_btn.isDown()) {
     d_btn.justPressed();
     delay(10);
   }
@@ -894,10 +894,8 @@ void showCombinedResults(const GattDisplayResults& results,
     bool navigateUp = upPressed();
     bool navigateDown = downPressed();
 #if (U_BTN >= 0) && (D_BTN >= 0)
-    const bool upDown = u_btn.getPullup() ? digitalRead(u_btn.getPin()) == LOW
-                                         : digitalRead(u_btn.getPin()) == HIGH;
-    const bool downDown = d_btn.getPullup() ? digitalRead(d_btn.getPin()) == LOW
-                                           : digitalRead(d_btn.getPin()) == HIGH;
+    const bool upDown = u_btn.isDown();
+    const bool downDown = d_btn.isDown();
     const uint8_t currentDirection = upDown == downDown ? 0 : (upDown ? 1 : 2);
     const uint32_t now = millis();
     if (!currentDirection) {
