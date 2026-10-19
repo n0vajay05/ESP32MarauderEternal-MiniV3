@@ -202,7 +202,10 @@ void Buffer::append(wifi_promiscuous_pkt_t* packet, int len) {
 }
 
 void Buffer::append(String log) {
-  add(reinterpret_cast<const uint8_t*>(log.c_str()), log.length(), false);
+  appendRecord(log);
+}
+bool Buffer::appendRecord(const String& log) {
+  return add(reinterpret_cast<const uint8_t*>(log.c_str()), log.length(), false);
 }
 
 bool Buffer::write(const uint8_t* data, uint32_t len) {

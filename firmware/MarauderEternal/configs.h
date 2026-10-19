@@ -4,10 +4,10 @@
 
   #define configs_h
 
-  // Marauder Eternal 1.15.6 is intentionally restricted to the
+  // Marauder Eternal 1.16.0 is intentionally restricted to the
   // Marauder Mini V3 hardware built around the ESP32-C5.
   #if !defined(ARDUINO_ESP32C5_DEV)
-    #error "Marauder Eternal 1.15.6 requires the ESP32-C5 board target"
+    #error "Marauder Eternal 1.16.0 requires the ESP32-C5 board target"
   #endif
 
   #ifndef MARAUDER_MINI_V3
@@ -49,10 +49,10 @@
   //#define DUAL_MINI_C5
   //// END BOARD TARGETS
 
-  #define JSON_SETTING_SIZE 2048
+  #define JSON_SETTING_SIZE 8192
 
   #define MARAUDER_NAME "Marauder Eternal"
-  #define MARAUDER_VERSION "v1.15.6"
+  #define MARAUDER_VERSION "v1.16.0"
   #define MARAUDER_PARTITION_LAYOUT "mini-v3-c5-8m-ota-v1"
 
   #define GRAPH_REFRESH   100

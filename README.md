@@ -1,4 +1,4 @@
-# ESP32 Marauder Eternal 1.15.6
+# ESP32 Marauder Eternal 1.16.0
 
 <img width="314" height="314" alt="esp32_marauder_eternal_source" src="https://github.com/user-attachments/assets/79332db4-7a71-423f-a99d-937090bb196f" />
 
@@ -19,14 +19,71 @@ Marauder code base by JustCallMeKoKo and modified for the Marauder Mini V3 only.
 ## Release identity
 
 - Product: `ESP32 Marauder Eternal`
-- Version: `v1.15.6`
-- Release notes: [1.15.6](release/RELEASE_NOTES_1.15.6.md)
+- Version: `v1.16.0`
+- Release notes: [1.16.0](release/RELEASE_NOTES_1.16.0.md)
 - Arduino ESP32 core used for the verified build: `3.3.4`
 - Board target: `esp32:esp32:esp32c5`
 - Options: `FlashSize=8M,PartitionScheme=custom,PSRAM=enabled`
 
 The source contains a compile-time guard that rejects non-ESP32-C5 board
 targets. `MARAUDER_MINI_V3` is also fixed by the project configuration.
+
+## 1.16.0 enhancements
+
+This release selectively incorporates these features from the official
+1.18.0 release while retaining Eternal's SSID grouping, target confirmation,
+and device classifiers. The packaged release images include the reliability
+fixes, enhancements, and FindMy workflow described below. Build the same source
+with `scripts/build.sh`.
+
+- **Saved WiFi Profiles** under WiFi General stores up to five networks.
+  Join Saved WiFi tries visible networks by signal strength, then hidden
+  profiles. A full list requires an explicit replacement; duplicate SSIDs
+  update the existing profile.
+- **Device > Wardrive Geofences** configures five exclusion zones with
+  radii from 0.1 to 1 mile. Collection pauses inside a zone or while GPS is
+  unavailable when zones are enabled. An exit margin prevents boundary flapping.
+- **Remote ID** retains aircraft identity across WiFi/BLE observations, shows
+  tracking status and a movement trail, and writes CSV plus GPX session exports
+  to `/logs/remoteid_N.*` on SD. Reception gaps create separate GPX segments.
+- **Bluetooth Sniffers > iBeacon Sniff / iBeacon Info** provides full UUID,
+  major/minor, signed measured power, RSSI, and advertisement counts. Identity
+  follows UUID/major/minor across changing Bluetooth addresses.
+- **GPS > GPS Tracker** has trip and receiver pages; use Left/Right to switch
+  and Center to stop. Distance rejects implausible jumps, accommodates slow
+  walking, and starts a new segment after fix loss. Trusted samples and queued
+  GPX points have separate counters.
+- **Fox Hunt** in WiFi Sniffers and **Bluetooth > BLE Discovery** offers recent (30 seconds),
+  WiFi band, and signal/name/channel sorting options. WiFi keeps APs grouped
+  by SSID and adds stations, Pineapple, and MultiSSID targets. Bluetooth adds
+  FindMy, Flipper, iBeacon, Meta, and Flock categories using the existing
+  classifiers. Filters apply only to Fox Hunt. Live signal expires after
+  reception stops; iBeacon hunts follow beacon identity across address changes.
+
+**Bluetooth Attacks > FindMy Attacks** opens a target action menu. When the
+list is empty, choose **Run FindMy Sniff** to discover targets. The scan stops
+automatically after **60 seconds**, or press Center to stop early; it returns
+to FindMy Attacks and refreshes its target list. The same 60-second limit applies
+when FindMy Sniff is started from Bluetooth Sniffers or serial commands. If no
+targets were found, the scan option remains available. After a fresh scan,
+select your target and choose **Test Connection** to inspect
+the link and sound service without sending sound commands or subscribing to
+notifications. **Play Sound** remains a separate action. The persistent result
+screen shows the failure stage, raw Bluetooth error and explanation, connection
+time, last advertised connectability and scan age, and discovered services.
+Owner proximity is a possible explanation for a connection failure, not a
+condition the Mini can confirm. A successful connection test checks advertised
+GATT capabilities; it does not guarantee a later sound write will be accepted.
+The Mini does not implement Apple's account-based iPhone Play Sound service.
+
+Serial diagnostics: `findmy --list`, `findmy --scan`, `findmy -t <index> --test`,
+`findmy --status`, and `findmy --result`. `selftest findmy` uses isolated fixtures.
+
+Run `scripts/test-native.sh` for the portable regression checks. Serial
+`selftest wifi`, `selftest geofence`, `selftest remoteid`, `selftest ibeacon`,
+`selftest gpstracker`, and `selftest fox` exercise isolated synthetic fixtures
+on the Mini with radio modes stopped. Device verification artifacts from this
+workspace are under `build/verification/`.
 
 ## GPS status and recovery
 
@@ -151,7 +208,7 @@ For a blank board, or when the bootloader and partition table must also be
 restored, use this one firmware payload:
 
 ```text
-release/Marauder_Eternal_1.15.6_MiniV3_ESP32-C5.bin
+release/Marauder_Eternal_1.16.0_MiniV3_ESP32-C5.bin
 ```
 
 It is an 8 MB merged image containing the ESP32-C5 bootloader, partition

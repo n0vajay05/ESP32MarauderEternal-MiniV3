@@ -751,6 +751,8 @@ void MenuFunctions::displayMenuButtons() {
 // Function to check menu input
 void MenuFunctions::main(uint32_t currentTime)
 {
+  if (fox_cleanup_pending) { closeFoxMenu(); return; }
+  if (fox_refresh_pending) { fox_refresh_pending = false; refreshFoxView(); return; }
   #if defined(MARAUDER_CARDPUTER) || defined(MARAUDER_CARDPUTER_ADV)
     this->updateKeyboard();
   #endif
@@ -804,6 +806,10 @@ void MenuFunctions::main(uint32_t currentTime)
       wifi_scan_obj.orient_display = false;
     }
   }
+
+  #ifdef HAS_NIMBLE_2
+    if (restoreFindMyAfterSniff()) return;
+  #endif
 
   if (currentTime != 0) {
     if (currentTime - initTime >= BANNER_TIME) {
@@ -1032,6 +1038,13 @@ void MenuFunctions::main(uint32_t currentTime)
     #endif
 
     #ifdef MARAUDER_MINI_V3
+      if (wifi_scan_obj.currentScanMode == GPS_TRACKER) {
+        if (c_btn_press) {
+          wifi_scan_obj.StartScan(WIFI_SCAN_OFF);
+          display_obj.init(); this->changeMenu(&gpsMenu, true);
+        } else if (l_btn.justPressed() || r_btn.justPressed()) wifi_scan_obj.cycleGpsTrackerPage();
+        return;
+      }
       if (wifi_scan_obj.currentScanMode == WIFI_SCAN_SSID_FINDER) {
         u_btn.justPressed();
         d_btn.justPressed();
@@ -2161,27 +2174,32 @@ void MenuFunctions::showBLETargetDetails(int index, Menu* returnMenu,
   const BleDevice device = ble_devices->get(index);
   const String vendorLabel = BLESecurityTools::deviceDisplayLabel(device);
   const String address = macToString(device.mac);
+  const uint16_t return_selection = returnMenu->selected;
 
   bleTargetDetailsMenu.list->clear();
   bleTargetDetailsMenu.name = startFoxHunt ? "Fox Hunt Target" : "BLE Target Details";
   bleTargetDetailsMenu.parentMenu = returnMenu;
 
   this->addNodes(&bleTargetDetailsMenu, text09, TFTLIGHTGREY, 0,
-                 [this, returnMenu, index]() {
-    this->changeMenu(returnMenu, true, index + 1);
+                 [this, returnMenu, return_selection]() {
+    this->changeMenu(returnMenu, true, return_selection);
   });
   this->addNodes(&bleTargetDetailsMenu, vendorLabel.c_str(),
                  rssiToMenuColor(device.rssi), DEVICE_INFO, []() {});
   this->addNodes(&bleTargetDetailsMenu, address.c_str(),
                  TFTWHITE, DEVICE_INFO, []() {});
 
-  const std::function<void()> confirmTarget = [this, index, returnMenu, startFoxHunt]() {
+  const std::function<void()> confirmTarget = [this, index, returnMenu, startFoxHunt, address]() {
     extern LinkedList<BleDevice>* ble_devices;
     if (index < 0 || index >= ble_devices->size()) {
       this->changeMenu(returnMenu, true);
       return;
     }
 
+    if (macToString(ble_devices->get(index).mac) != address) {
+      Serial.println(F("Target list changed; choose the target again"));
+      this->changeMenu(returnMenu, true); return;
+    }
     for (int other = 0; other < ble_devices->size(); other++) {
       BleDevice candidate = ble_devices->get(other);
       candidate.selected = other == index;
@@ -2563,7 +2581,7 @@ void MenuFunctions::buildSSIDGroupMenu(SSIDMenuMode mode) {
                                          : (fox_hunt_mode
                                                 ? "Fox Hunt SSID"
                                                 : "Select SSIDs")));
-  ssidGroupMenu.parentMenu = evil_portal_mode
+  ssidGroupMenu.parentMenu = fox_hunt_mode ? &foxHuntMenu : evil_portal_mode
                                  ? &evilPortalMenu
                                  : (deauth_mode ? &wifiAttackMenu
                                                 : &wifiSnifferMenu);
@@ -2581,6 +2599,8 @@ void MenuFunctions::buildSSIDGroupMenu(SSIDMenuMode mode) {
     this->changeMenu(ssidGroupMenu.parentMenu, true);
   });
 
+  if (fox_hunt_mode) this->addNodes(&ssidGroupMenu, "Filters / Sort", TFTCYAN, SETTINGS, [this]() { this->buildFoxOptions(&ssidGroupMenu); });
+
   if (access_points->size() == 0) {
     this->addNodes(&ssidGroupMenu, "No APs - scan first", TFTORANGE,
                    DEVICE_INFO, []() {});
@@ -2590,11 +2610,14 @@ void MenuFunctions::buildSSIDGroupMenu(SSIDMenuMode mode) {
   struct SSIDGroupSummary {
     String name;
     int8_t strongest_rssi;
+    uint8_t channel;
   };
 
   std::vector<SSIDGroupSummary> groups;
   for (int index = 0; index < access_points->size(); index++) {
-    const String group_name = access_points->get(index).essid;
+    const auto observed = access_points->get(index);
+    if (fox_hunt_mode && !foxAPVisible(observed)) continue;
+    const String group_name = observed.essid;
     int group_index = -1;
     for (int candidate = 0; candidate < static_cast<int>(groups.size()); candidate++) {
       if (groups[candidate].name == group_name) {
@@ -2604,21 +2627,29 @@ void MenuFunctions::buildSSIDGroupMenu(SSIDMenuMode mode) {
     }
 
     if (group_index < 0) {
-      groups.push_back({group_name, access_points->get(index).rssi});
+      groups.push_back({group_name, access_points->get(index).rssi, observed.channel});
     }
-    else if (access_points->get(index).rssi > groups[group_index].strongest_rssi) {
-      groups[group_index].strongest_rssi = access_points->get(index).rssi;
+    else {
+      if (access_points->get(index).rssi > groups[group_index].strongest_rssi)
+        groups[group_index].strongest_rssi = access_points->get(index).rssi;
+      if (observed.channel && (!groups[group_index].channel || observed.channel < groups[group_index].channel))
+        groups[group_index].channel = observed.channel;
     }
   }
 
   std::sort(groups.begin(), groups.end(),
-            [](const SSIDGroupSummary& left,
+            [this, fox_hunt_mode](const SSIDGroupSummary& left,
                const SSIDGroupSummary& right) {
+    if (fox_hunt_mode && fox_wifi_options.sort == marauder::fox::Sort::Name)
+      return left.name.compareTo(right.name) < 0;
+    if (fox_hunt_mode && fox_wifi_options.sort == marauder::fox::Sort::Channel && left.channel != right.channel)
+      return left.channel < right.channel;
     if (left.strongest_rssi != right.strongest_rssi)
       return left.strongest_rssi > right.strongest_rssi;
     return left.name.compareTo(right.name) < 0;
   });
 
+  if (fox_hunt_mode && groups.empty()) this->addNodes(&ssidGroupMenu, "No APs match filters", TFTORANGE, DEVICE_INFO, [](){});
   for (const SSIDGroupSummary& group : groups) {
     const String group_name = group.name;
 
@@ -2628,7 +2659,7 @@ void MenuFunctions::buildSSIDGroupMenu(SSIDMenuMode mode) {
     bool channels[256] = {};
     for (int ap_index = 0; ap_index < access_points->size(); ap_index++) {
       const AccessPoint access_point = access_points->get(ap_index);
-      if (access_point.essid != group_name)
+      if (access_point.essid != group_name || (fox_hunt_mode && !foxAPVisible(access_point)))
         continue;
 
       ap_count++;
@@ -2668,6 +2699,10 @@ void MenuFunctions::buildSSIDGroupMenu(SSIDMenuMode mode) {
         return;
       }
 
+      if (fox_hunt_mode) {
+        fox_ssid_context = group_name; fox_options_return = &ssidAPMenu;
+        fox_refresh_pending = true; return;
+      }
       // Only one transient selector list is needed at a time. Rebuild the
       // group list on Back instead of retaining it behind the AP list.
       ssidGroupMenu.list->clear();
@@ -2688,6 +2723,7 @@ void MenuFunctions::buildSSIDAPMenu(const String& group_name,
   const bool fox_hunt_mode = mode == SSIDMenuMode::FoxHunt;
   const bool evil_portal_mode = mode == SSIDMenuMode::EvilPortal;
 
+  if (fox_hunt_mode) fox_ssid_context = group_name;
   ssidAPMenu.list->clear();
   ssidAPMenu.name = group_name.length() > 0 ? group_name : "Hidden SSID";
   ssidAPMenu.parentMenu = &ssidGroupMenu;
@@ -2699,16 +2735,19 @@ void MenuFunctions::buildSSIDAPMenu(const String& group_name,
     this->changeMenu(&ssidGroupMenu, true, group_selection);
   });
 
+  if (fox_hunt_mode) this->addNodes(&ssidAPMenu, "Filters / Sort", TFTCYAN, SETTINGS, [this]() { this->buildFoxOptions(&ssidAPMenu); });
   std::vector<int> group_ap_indices;
   for (int index = 0; index < access_points->size(); index++) {
-    if (access_points->get(index).essid == group_name)
+    if (access_points->get(index).essid == group_name && (!fox_hunt_mode || foxAPVisible(access_points->get(index))))
       group_ap_indices.push_back(index);
   }
   std::sort(group_ap_indices.begin(), group_ap_indices.end(),
-            [](int left_index, int right_index) {
+            [this, fox_hunt_mode](int left_index, int right_index) {
     extern LinkedList<AccessPoint>* access_points;
     const AccessPoint left = access_points->get(left_index);
     const AccessPoint right = access_points->get(right_index);
+    if (fox_hunt_mode && fox_wifi_options.sort == marauder::fox::Sort::Channel && left.channel != right.channel) return left.channel < right.channel;
+    if (fox_hunt_mode && fox_wifi_options.sort == marauder::fox::Sort::Name) return memcmp(left.bssid, right.bssid, 6) < 0;
     if (left.rssi != right.rssi)
       return left.rssi > right.rssi;
     return memcmp(left.bssid, right.bssid, sizeof(left.bssid)) < 0;
@@ -2759,6 +2798,7 @@ void MenuFunctions::buildSSIDAPMenu(const String& group_name,
 
       access_point.selected = !access_point.selected;
       access_points->set(index, access_point);
+      if (fox_hunt_mode) { fox_options_return = &ssidAPMenu; fox_ssid_context = group_name; fox_refresh_pending = true; return; }
       this->buildSSIDAPMenu(group_name, mode);
       this->changeMenu(&ssidAPMenu, true, menu_index);
     }, access_point.selected);
@@ -3266,6 +3306,13 @@ void MenuFunctions::RunSetup()
   #endif*/
   wifiGeneralMenu.list = new LinkedList<MenuNode>();
   wifiAPMenu.list = new LinkedList<MenuNode>();
+  iBeaconMenu.list = new LinkedList<MenuNode>();
+  iBeaconInfoMenu.list = new LinkedList<MenuNode>();
+  geofenceMenu.list = new LinkedList<MenuNode>();
+  geofenceActionMenu.list = new LinkedList<MenuNode>();
+  geofenceRadiusMenu.list = new LinkedList<MenuNode>();
+  savedWifiMenu.list = new LinkedList<MenuNode>();
+  savedWifiActionsMenu.list = new LinkedList<MenuNode>();
   ssidGroupMenu.list = new LinkedList<MenuNode>();
   ssidAPMenu.list = new LinkedList<MenuNode>();
   stationSSIDMenu.list = new LinkedList<MenuNode>();
@@ -3290,6 +3337,8 @@ void MenuFunctions::RunSetup()
   bleTargetMenu.list = new LinkedList<MenuNode>();
   bleTargetDetailsMenu.list = new LinkedList<MenuNode>();
   bleConfirmMenu.list = new LinkedList<MenuNode>();
+  findMyActionsMenu.list = new LinkedList<MenuNode>();
+  findMyResultMenu.list = new LinkedList<MenuNode>();
 
   // Settings stuff
   generateSSIDsMenu.list = new LinkedList<MenuNode>();
@@ -3321,6 +3370,9 @@ void MenuFunctions::RunSetup()
   #endif
 
   foxHuntMenu.list = new LinkedList<MenuNode>();
+  foxTargetsMenu.list = new LinkedList<MenuNode>();
+  foxOptionsMenu.list = new LinkedList<MenuNode>();
+  foxDetailsMenu.list = new LinkedList<MenuNode>();
 
   // Work menu names
   mainMenu.name = text_table1[6];
@@ -3504,7 +3556,7 @@ void MenuFunctions::RunSetup()
     this->drawStatusBar();
     wifi_scan_obj.StartScan(WIFI_PING_SCAN, TFT_CYAN);
   });
-  #ifndef HAS_DUAL_BAND
+  #if !defined(HAS_DUAL_BAND) || defined(MARAUDER_MINI_V3)
     this->addNodes(&wifiScannerMenu, "ARP Scan", TFTCYAN, SCANNERS, [this]() {
       display_obj.clearScreen();
       this->drawStatusBar();
@@ -3742,15 +3794,7 @@ void MenuFunctions::RunSetup()
     this->drawStatusBar();
     wifi_scan_obj.StartScan(WIFI_SCAN_MULTISSID, TFT_ORANGE);
   });
-  this->addNodes(&wifiSnifferMenu, "Fox Hunt", TFTCYAN, SCANNERS, [this]() {
-    for (int index = 0; index < access_points->size(); index++) {
-      AccessPoint access_point = access_points->get(index);
-      access_point.selected = false;
-      access_points->set(index, access_point);
-    }
-    this->buildSSIDGroupMenu(SSIDMenuMode::FoxHunt);
-    this->changeMenu(&ssidGroupMenu, true);
-  });
+  this->addNodes(&wifiSnifferMenu, "Fox Hunt", TFTCYAN, SCANNERS, [this]() { this->showFoxMenu(false); });
   this->addNodes(&wifiSnifferMenu, "MAC Monitor", TFTMAGENTA, SCANNERS, [this]() {
     display_obj.clearScreen();
     this->drawStatusBar();
@@ -3785,6 +3829,13 @@ void MenuFunctions::RunSetup()
       wifi_scan_obj.resetStandaloneWiFiState();
       DroneRemoteID::run();
       wifi_scan_obj.resetStandaloneWiFiState();
+      this->changeMenu(&wifiSnifferMenu, true);
+    });
+    this->addNodes(&wifiSnifferMenu, "Remote ID Exports", TFTCYAN, SD_UPDATE, [this]() {
+      const bool saved = DroneRemoteID::exportRetained();
+      display_obj.clearScreen();
+      display_obj.showCenterText(saved ? "CSV / GPX saved" : "No export available", TFT_HEIGHT / 2);
+      delay(1200);
       this->changeMenu(&wifiSnifferMenu, true);
     });
   #endif
@@ -4116,7 +4167,8 @@ void MenuFunctions::RunSetup()
               wifi_scan_obj.currentScanMode = LV_JOIN_WIFI;
               wifi_scan_obj.StartScan(LV_JOIN_WIFI, TFT_YELLOW); 
               wifi_scan_obj.joinWiFi(access_points->get(i).essid, password);
-              this->changeMenu(current_menu, true);
+              if (wifi_scan_obj.hasPendingWiFi()) this->showSavedWifiMenu(true);
+              else this->changeMenu(&wifiGeneralMenu, true);
             }
           #endif
 
@@ -4135,54 +4187,11 @@ void MenuFunctions::RunSetup()
     });
 
     this->addNodes(&wifiGeneralMenu, "Join Saved WiFi", TFTWHITE, KEYBOARD_ICO, [this](){
-      String ssid = settings_obj.loadSetting<String>("ClientSSID");
-      String pw = settings_obj.loadSetting<String>("ClientPW");
-
-      if (ssid != "") {
-        wifi_scan_obj.joinWiFi(ssid, pw, false);
-        this->changeMenu(&wifiGeneralMenu, true);
-      }
-      else {
-        wifiAPMenu.parentMenu = &wifiGeneralMenu;
-
-        // Add the back button
-        wifiAPMenu.list->clear();
-          this->addNodes(&wifiAPMenu, text09, TFTLIGHTGREY, 0, [this]() {
-          this->changeMenu(wifiAPMenu.parentMenu, true);
-        });
-
-        // Populate the menu with buttons
-        for (int i = 0; i < access_points->size(); i++) {
-          // This is the menu node
-          this->addNodes(&wifiAPMenu, access_points->get(i).essid.c_str(), TFTCYAN, 255, [this, i](){
-            // Join WiFi using mini keyboard
-            #ifdef HAS_MINI_KB
-              this->changeMenu(&miniKbMenu, true);
-              String password = access_points->get(i).sec == WIFI_AUTH_OPEN ?
-                  "" : this->miniKeyboard(&miniKbMenu, true);
-              if (password != "" ||
-                  access_points->get(i).sec == WIFI_AUTH_OPEN) {
-                Serial.println("Using SSID: " + (String)access_points->get(i).essid);
-                wifi_scan_obj.currentScanMode = LV_JOIN_WIFI;
-                wifi_scan_obj.StartScan(LV_JOIN_WIFI, TFT_YELLOW); 
-                wifi_scan_obj.joinWiFi(access_points->get(i).essid, password);
-                this->changeMenu(current_menu, true);
-              }
-            #endif
-
-            // Join WiFi using touch screen keyboard
-            #ifdef HAS_TOUCH
-              char passwordBuf[64] = {0};  // or prefill with existing SSID
-              if (keyboardInput(passwordBuf, sizeof(passwordBuf), "Enter Password")) {
-                wifi_scan_obj.joinWiFi(access_points->get(i).essid, String(passwordBuf), true);
-              }
-
-              this->changeMenu(&wifiGeneralMenu, true);
-            #endif
-          });
-        }
-        this->changeMenu(&wifiAPMenu, true);
-      }
+      wifi_scan_obj.joinSavedWiFi(false);
+      this->changeMenu(&wifiGeneralMenu, true);
+    });
+    this->addNodes(&wifiGeneralMenu, "Saved WiFi Profiles", TFTWHITE, KEYBOARD_ICO, [this](){
+      this->showSavedWifiMenu();
     });
 
     this->addNodes(&wifiGeneralMenu, "Start AP", TFTGREEN, KEYBOARD_ICO, [this](){
@@ -4281,7 +4290,7 @@ void MenuFunctions::RunSetup()
       else {
         display_obj.clearScreen();
         display_obj.showCenterText(String("Connecting to " + ssid).c_str(), TFT_HEIGHT / 2, true);
-        if (!wifi_scan_obj.joinWiFi(ssid, pw, false)) {
+        if (!wifi_scan_obj.joinSavedWiFi(false)) {
           display_obj.clearScreen();
           display_obj.tft.setTextWrap(true);
           display_obj.tft.setCursor(0, SCREEN_HEIGHT / 3);
@@ -4334,7 +4343,7 @@ void MenuFunctions::RunSetup()
       else {
         display_obj.clearScreen();
         display_obj.showCenterText(String("Connecting to " + ssid).c_str(), TFT_HEIGHT / 2, true);
-        if (!wifi_scan_obj.joinWiFi(ssid, pw, false)) {
+        if (!wifi_scan_obj.joinSavedWiFi(false)) {
           display_obj.clearScreen();
           display_obj.tft.setTextWrap(true);
           display_obj.tft.setCursor(0, SCREEN_HEIGHT / 3);
@@ -4387,7 +4396,7 @@ void MenuFunctions::RunSetup()
       else {
         display_obj.clearScreen();
         display_obj.showCenterText(String("Connecting to " + ssid).c_str(), TFT_HEIGHT / 2, true);
-        if (!wifi_scan_obj.joinWiFi(ssid, pw, false)) {
+        if (!wifi_scan_obj.joinSavedWiFi(false)) {
           display_obj.clearScreen();
           display_obj.tft.setTextWrap(true);
           display_obj.tft.setCursor(0, SCREEN_HEIGHT / 3);
@@ -4482,7 +4491,7 @@ void MenuFunctions::RunSetup()
       else {
         display_obj.clearScreen();
         display_obj.showCenterText(String("Connecting to " + ssid).c_str(), TFT_HEIGHT / 2, true);
-        if (!wifi_scan_obj.joinWiFi(ssid, pw, false)) {
+        if (!wifi_scan_obj.joinSavedWiFi(false)) {
           display_obj.clearScreen();
           display_obj.tft.setTextWrap(true);
           display_obj.tft.setCursor(0, SCREEN_HEIGHT / 3);
@@ -4532,7 +4541,7 @@ void MenuFunctions::RunSetup()
       else {
         display_obj.clearScreen();
         display_obj.showCenterText(String("Connecting to " + ssid).c_str(), TFT_HEIGHT / 2, true);
-        if (!wifi_scan_obj.joinWiFi(ssid, pw, false)) {
+        if (!wifi_scan_obj.joinSavedWiFi(false)) {
           display_obj.clearScreen();
           display_obj.tft.setTextWrap(true);
           display_obj.tft.setCursor(0, SCREEN_HEIGHT / 3);
@@ -4581,7 +4590,7 @@ void MenuFunctions::RunSetup()
       else {
         display_obj.clearScreen();
         display_obj.showCenterText(String("Connecting to " + ssid).c_str(), TFT_HEIGHT / 2, true);
-        if (!wifi_scan_obj.joinWiFi(ssid, pw, false)) {
+        if (!wifi_scan_obj.joinSavedWiFi(false)) {
           display_obj.clearScreen();
           display_obj.tft.setTextWrap(true);
           display_obj.tft.setCursor(0, SCREEN_HEIGHT / 3);
@@ -4755,24 +4764,7 @@ void MenuFunctions::RunSetup()
     }
     this->changeMenu(&bleTargetMenu, true);
   });
-  this->addNodes(&bleSecurityMenu, "Fox Hunt", TFTCYAN, SCANNERS, [this]() {
-    extern LinkedList<BleDevice>* ble_devices;
-    foxHuntMenu.list->clear();
-    foxHuntMenu.parentMenu = &bleSecurityMenu;
-    this->addNodes(&foxHuntMenu, text09, TFTLIGHTGREY, 0, [this]() {
-      this->changeMenu(foxHuntMenu.parentMenu, true);
-    });
-    const int menuLimit = min(ble_devices->size(), 40);
-    for (int index = 0; index < menuLimit; index++) {
-      const BleDevice device = ble_devices->get(index);
-      const String label = BLESecurityTools::deviceDisplayLabel(device);
-      const uint8_t color = device.connectable ? rssiToMenuColor(device.rssi) : TFTDARKGREY;
-      this->addNodes(&foxHuntMenu, label.c_str(), color, BLUETOOTH, [this, index]() {
-        this->showBLETargetDetails(index, &foxHuntMenu, true);
-      });
-    }
-    this->changeMenu(&foxHuntMenu, true);
-  });
+  this->addNodes(&bleSecurityMenu, "Fox Hunt", TFTCYAN, SCANNERS, [this]() { this->showFoxMenu(true); });
   this->addNodes(&bleSecurityMenu, "GATT - Advertised Services Enumeration", TFTGREEN,
                  DEVICE_INFO, [this]() {
     BLESecurityTools::inspectTarget();
@@ -4848,8 +4840,13 @@ void MenuFunctions::RunSetup()
       this->changeMenu(&bluetoothSnifferMenu, true);
     });
     this->addNodes(&bluetoothSnifferMenu, "iBeacon Sniff", TFTPURPLE, BLUETOOTH_SNIFF, [this]() {
+      wifi_scan_obj.resetStandaloneWiFiState();
       BLEDeviceDetectors::run(BLEDeviceDetectors::DetectorType::IBeacon);
+      wifi_scan_obj.resetStandaloneWiFiState();
       this->changeMenu(&bluetoothSnifferMenu, true);
+    });
+    this->addNodes(&bluetoothSnifferMenu, "iBeacon Info", TFTPURPLE, KEYBOARD_ICO, [this]() {
+      this->showIBeaconMenu();
     });
     this->addNodes(&bluetoothSnifferMenu, "nyanBOX Sniff", TFTMAGENTA, BLUETOOTH_SNIFF, [this]() {
       BLEDeviceDetectors::run(BLEDeviceDetectors::DetectorType::NyanBox);
@@ -4946,53 +4943,7 @@ void MenuFunctions::RunSetup()
       });
 
       #ifdef HAS_NIMBLE_2
-      this->addNodes(&bluetoothAttackMenu, "FindMy Sound", TFTCYAN, ATTACKS, [this](){
-          wifiAPMenu.parentMenu = &bluetoothAttackMenu;
-
-          // Clear nodes and add back button
-          wifiAPMenu.list->clear();
-          this->addNodes(&wifiAPMenu, text09, TFTLIGHTGREY, 0, [this]() {
-          this->changeMenu(wifiAPMenu.parentMenu, true);
-        });
-
-        /*this->addNodes(&wifiAPMenu, "Live", TFTMAGENTA, 0, [this]() {
-          display_obj.clearScreen();
-          this->drawStatusBar();
-          wifi_scan_obj.StartScan(BT_ATTACK_FINDMY_LIVE, TFT_RED);
-        });*/
-
-        int menu_limit = airtags->size();
-
-        // Create the menu nodes for all of the list items
-        for (int i = 0; i < menu_limit; i++) {
-          uint8_t node_color = rssiToMenuColor(airtags->get(i).rssi);
-          String node_name = String(airtags->get(i).rssi) + " " + airtags->get(i).mac;
-          this->addNodes(&wifiAPMenu, node_name.c_str(), node_color, BLUETOOTH, [this, i](){
-            AirTag new_at = airtags->get(i);
-            new_at.selected = true;
-            new_at.connectable = true;
-
-            airtags->set(i, new_at);
-
-            // Set all other airtags to "Not Selected"
-            for (int x = 0; x < airtags->size(); x++) {
-              if (x != i) {
-                AirTag new_atx = airtags->get(x);
-                new_atx.selected = false;
-                airtags->set(x, new_atx);
-              }
-            }
-
-            // Start the spoof
-            display_obj.clearScreen();
-            this->drawStatusBar();
-            wifi_scan_obj.executeFindMySound(true);
-            delay(2000);
-            this->changeMenu(&wifiAPMenu, true);
-          });
-        }
-        this->changeMenu(&wifiAPMenu, true);
-      });
+      this->addNodes(&bluetoothAttackMenu, "FindMy Attacks", TFTCYAN, ATTACKS, [this](){ this->showFindMyMenu(); });
       #endif
 
       wifiAPMenu.parentMenu = &bluetoothAttackMenu;
@@ -5148,19 +5099,16 @@ void MenuFunctions::RunSetup()
       });
 
       this->addNodes(&gpsMenu, "GPS Data", TFTRED, GPS_MENU, [this]() {
-        wifi_scan_obj.currentScanMode = WIFI_SCAN_GPS_DATA;
         this->changeMenu(&gpsInfoMenu, true);
         wifi_scan_obj.StartScan(WIFI_SCAN_GPS_DATA, TFT_CYAN);
       });
 
       this->addNodes(&gpsMenu, "NMEA Stream", TFTORANGE, GPS_MENU, [this]() {
-        wifi_scan_obj.currentScanMode = WIFI_SCAN_GPS_NMEA;
         this->changeMenu(&gpsInfoMenu, true);
         wifi_scan_obj.StartScan(WIFI_SCAN_GPS_NMEA, TFT_ORANGE);
       });
 
       this->addNodes(&gpsMenu, "GPS Tracker", TFTGREEN, GPS_MENU, [this]() {
-        wifi_scan_obj.currentScanMode = GPS_TRACKER;
         this->changeMenu(&gpsInfoMenu, true);
         wifi_scan_obj.StartScan(GPS_TRACKER, TFT_CYAN);
       });
@@ -5200,6 +5148,10 @@ void MenuFunctions::RunSetup()
         this->changeMenu(gpsInfoMenu.parentMenu, true);
       }); 
   #endif
+
+  this->addNodes(&deviceMenu, "Wardrive Geofences", TFTGREEN, GPS_MENU, [this]() {
+    this->showGeofenceMenu();
+  });
 
   // Settings menu
   // Device menu
@@ -6546,7 +6498,464 @@ void MenuFunctions::displayCurrentMenu(int start_index)
   }
 #endif
 
+void MenuFunctions::showSavedWifiMenu(bool replace) {
+  savedWifiMenu.name = replace ? "Replace saved WiFi" : "Saved WiFi Profiles";
+  savedWifiMenu.parentMenu = &wifiGeneralMenu;
+  savedWifiMenu.list->clear();
+  this->addNodes(&savedWifiMenu, replace ? "Cancel saving" : "Back", TFTLIGHTGREY, 0, [this]() {
+    wifi_scan_obj.discardPendingWiFi();
+    this->changeMenu(&wifiGeneralMenu, true);
+  });
+  const unsigned count = settings_obj.getSavedWifiCount();
+  if (!count) this->addNodes(&savedWifiMenu, "No saved profiles", TFTLIGHTGREY, 0, [](){});
+  for (unsigned i = 0; i < count; ++i) {
+    String ssid, password;
+    if (!settings_obj.loadSavedWifiCredential(i, ssid, password)) continue;
+    this->addNodes(&savedWifiMenu, ((replace ? "Replace " : "") + ssid).c_str(), TFTCYAN, 0, [this, i, replace]() {
+      if (replace) {
+        if (!wifi_scan_obj.savePendingWiFi(i)) Serial.println(F("Profile replacement failed"));
+        this->changeMenu(&wifiGeneralMenu, true);
+        return;
+      }
+      savedWifiActionsMenu.list->clear();
+      savedWifiActionsMenu.name = "WiFi Profile";
+      savedWifiActionsMenu.parentMenu = &savedWifiMenu;
+      this->addNodes(&savedWifiActionsMenu, "Back", TFTLIGHTGREY, 0, [this]() {
+        this->changeMenu(&savedWifiMenu, true);
+      });
+      this->addNodes(&savedWifiActionsMenu, "Connect", TFTGREEN, 0, [this, i]() {
+        wifi_scan_obj.joinSavedWiFi(false, i);
+        this->changeMenu(&wifiGeneralMenu, true);
+      });
+      this->addNodes(&savedWifiActionsMenu, "Forget profile", TFTRED, 0, [this, i]() {
+        if (!settings_obj.removeSavedWifiCredential(i)) Serial.println(F("Could not forget profile"));
+        // Rebuild only the other menu; never destroy the executing callback.
+        this->showSavedWifiMenu();
+      });
+      this->changeMenu(&savedWifiActionsMenu, true);
+    });
+  }
+  this->changeMenu(&savedWifiMenu, true);
+}
+
+
+void MenuFunctions::showGeofenceMenu() {
+  geofenceMenu.name = "Wardrive Geofences";
+  geofenceMenu.parentMenu = &deviceMenu;
+  geofenceMenu.list->clear();
+  this->addNodes(&geofenceMenu, "Back", TFTLIGHTGREY, 0, [this]() { this->changeMenu(&deviceMenu, true); });
+  for (unsigned slot = 0; slot < geofences::kMax; ++slot) {
+    geofences::Config fence;
+    const bool configured = settings_obj.loadGeofence(slot, fence);
+    const String label = String(slot + 1) + ": " + (configured ? String(fence.name) : "Empty");
+    this->addNodes(&geofenceMenu, label.c_str(), configured ? TFTGREEN : TFTLIGHTGREY, GPS_MENU,
+        [this, slot]() { this->showGeofenceActions(slot); });
+  }
+  this->changeMenu(&geofenceMenu, true);
+}
+void MenuFunctions::showGeofenceActions(unsigned slot) {
+  geofenceActionMenu.name = "Geofence";
+  geofenceActionMenu.parentMenu = &geofenceMenu;
+  geofenceActionMenu.list->clear();
+  this->addNodes(&geofenceActionMenu, "Back", TFTLIGHTGREY, 0, [this]() { this->showGeofenceMenu(); });
+  this->addNodes(&geofenceActionMenu, "Enter coordinates", TFTCYAN, GPS_MENU, [this, slot]() { this->editGeofence(slot, false); });
+  this->addNodes(&geofenceActionMenu, "Use current GPS", TFTGREEN, GPS_MENU, [this, slot]() { this->editGeofence(slot, true); });
+  geofences::Config fence;
+  if (settings_obj.loadGeofence(slot, fence)) {
+    const String detail = String(fence.radiusMiles, 1) + " mi radius";
+    this->addNodes(&geofenceActionMenu, detail.c_str(), TFTLIGHTGREY, 0, [](){});
+    this->addNodes(&geofenceActionMenu, "Clear geofence", TFTRED, 0, [this, slot]() {
+      if (settings_obj.clearGeofence(slot)) wifi_scan_obj.reloadGeofences();
+      this->showGeofenceMenu();
+    });
+  }
+  this->changeMenu(&geofenceActionMenu, true);
+}
+void MenuFunctions::editGeofence(unsigned slot, bool current) {
+  #if defined(HAS_MINI_KB) && defined(HAS_GPS)
+    geofences::Config fence;
+    fence.enabled = true;
+    const auto input = [this](const char* title) {
+      const String previous_title = miniKbMenu.name;
+      miniKbMenu.name = title;
+      this->changeMenu(&miniKbMenu, true);
+      const String result = this->miniKeyboard(&miniKbMenu, false);
+      miniKbMenu.name = previous_title;
+      return result;
+    };
+    const auto fail = [this](const char* message) {
+      display_obj.clearScreen(); display_obj.showCenterText(message, TFT_HEIGHT / 2);
+      delay(1200); this->showGeofenceMenu();
+    };
+    if (current && (!gps_obj.getFixStatus() || gps_obj.getLastSentenceAgeMs() > 5000)) {
+      fail("GPS fix needed"); return;
+    }
+    if (current) {
+      fence.latitude = gps_obj.getLatInt() / 1000000.0;
+      fence.longitude = gps_obj.getLonInt() / 1000000.0;
+    }
+    String name = input("Geofence name"); name.trim();
+    if (!name.length() || name.length() > 32) { fail("Invalid name"); return; }
+    strcpy(fence.name, name.c_str());
+    if (!current) {
+      String lat = input("Latitude -90..90");
+      if (!lat.length()) { this->showGeofenceMenu(); return; }
+      String lon = input("Longitude -180..180");
+      char* end_lat = nullptr; char* end_lon = nullptr;
+      fence.latitude = strtod(lat.c_str(), &end_lat);
+      fence.longitude = strtod(lon.c_str(), &end_lon);
+      if (!lat.length() || !lon.length() || *end_lat || *end_lon ||
+          !geofences::coordinates(fence.latitude, fence.longitude)) {
+        fail("Invalid coordinates"); return;
+      }
+    }
+    pendingGeofence = fence; pendingGeofenceSlot = slot;
+    geofenceRadiusMenu.name = "Radius (miles)";
+    geofenceRadiusMenu.parentMenu = &geofenceMenu;
+    geofenceRadiusMenu.list->clear();
+    this->addNodes(&geofenceRadiusMenu, "Cancel", TFTLIGHTGREY, 0, [this]() { this->showGeofenceMenu(); });
+    for (unsigned step = 1; step <= 10; ++step) {
+      const String label = String(step / 10.0f, 1) + " mi";
+      this->addNodes(&geofenceRadiusMenu, label.c_str(), TFTCYAN, GPS_MENU, [this, step]() {
+        pendingGeofence.radiusMiles = step / 10.0f;
+        if (settings_obj.saveGeofence(pendingGeofenceSlot, pendingGeofence)) wifi_scan_obj.reloadGeofences();
+        else Serial.println(F("Geofence save failed"));
+        this->showGeofenceMenu();
+      });
+    }
+    this->changeMenu(&geofenceRadiusMenu, true);
+  #endif
+}
+
+
+void MenuFunctions::showIBeaconMenu() {
+  iBeaconMenu.name = "iBeacon Info";
+  iBeaconMenu.parentMenu = &bluetoothSnifferMenu;
+  iBeaconMenu.list->clear();
+  this->addNodes(&iBeaconMenu, "Back", TFTLIGHTGREY, 0, [this]() { this->changeMenu(&bluetoothSnifferMenu, true); });
+  const unsigned count = BLEDeviceDetectors::iBeaconCount();
+  if (!count) this->addNodes(&iBeaconMenu, "Scan iBeacons first", TFTLIGHTGREY, 0, [](){});
+  for (unsigned i = 0; i < count; ++i) {
+    marauder::IBeaconObservation beacon;
+    if (!BLEDeviceDetectors::snapshotIBeacon(i, beacon)) continue;
+    const String label = String(beacon.beacon.major) + ":" + String(beacon.beacon.minor) + " " + String(beacon.rssi) + "dBm";
+    this->addNodes(&iBeaconMenu, label.c_str(), TFTCYAN, BLUETOOTH, [this, i]() {
+      marauder::IBeaconObservation item;
+      if (!BLEDeviceDetectors::snapshotIBeacon(i, item)) return;
+      iBeaconInfoMenu.name = "iBeacon Details";
+      iBeaconInfoMenu.parentMenu = &iBeaconMenu;
+      iBeaconInfoMenu.list->clear();
+      this->addNodes(&iBeaconInfoMenu, "Back", TFTLIGHTGREY, 0, [this]() { this->changeMenu(&iBeaconMenu, true); });
+      const auto row = [this](const String& text) { this->addNodes(&iBeaconInfoMenu, text.c_str(), TFTCYAN, 255, [](){}); };
+      char uuid[37]; marauder::formatIBeaconUuid(item.beacon, uuid, sizeof(uuid));
+      row(item.address); row(String(uuid).substring(0, 18)); row(String(uuid).substring(18));
+      row("Major: " + String(item.beacon.major)); row("Minor: " + String(item.beacon.minor));
+      row("Measured: " + String(item.beacon.measured_power) + "dBm"); row("RSSI: " + String(item.rssi) + "dBm");
+      row("Advertisements: " + String(item.advertisements));
+      this->changeMenu(&iBeaconInfoMenu, true);
+    });
+  }
+  this->changeMenu(&iBeaconMenu, true);
+}
+
+
+extern LinkedList<AccessPoint>* access_points;
+extern LinkedList<BleDevice>* ble_devices;
+extern LinkedList<AirTag>* airtags;
+
+bool MenuFunctions::foxAPVisible(const AccessPoint& ap) {
+  marauder::fox::Candidate item; item.channel = ap.channel; item.lastSeen = ap.last_seen_ms;
+  return marauder::fox::matches(item, fox_wifi_options, millis());
+}
+void MenuFunctions::configureFoxFilters(bool bluetooth, marauder::fox::Band band, bool recent, marauder::fox::Sort sort) {
+  auto& options = bluetooth ? fox_ble_options : fox_wifi_options;
+  options.band = bluetooth ? marauder::fox::Band::Any : band;
+  options.recent = recent;
+  options.sort = bluetooth && sort == marauder::fox::Sort::Channel ? marauder::fox::Sort::Signal : sort;
+}
+void MenuFunctions::showFoxMenu(bool bluetooth) {
+  if (wifi_scan_obj.currentScanMode != WIFI_SCAN_OFF && wifi_scan_obj.currentScanMode != WIFI_CONNECTED)
+    wifi_scan_obj.StartScan(WIFI_SCAN_OFF);
+  fox_cleanup_pending = false; fox_bluetooth = bluetooth;
+  foxHuntMenu.name = bluetooth ? "Bluetooth Fox Hunt" : "WiFi Fox Hunt";
+  foxHuntMenu.parentMenu = bluetooth ? &bleSecurityMenu : &wifiSnifferMenu;
+  foxHuntMenu.list->clear();
+  this->addNodes(&foxHuntMenu, "Back", TFTLIGHTGREY, 0, [this]() {
+    this->changeMenu(foxHuntMenu.parentMenu, true); fox_cleanup_pending = true;
+  });
+  this->addNodes(&foxHuntMenu, "Filters / Sort", TFTCYAN, SETTINGS, [this]() { this->buildFoxOptions(&foxHuntMenu); });
+  const auto category = [this](const char* name, marauder::fox::Kind kind) {
+    this->addNodes(&foxHuntMenu, name, TFTCYAN, SCANNERS, [this, kind]() { this->showFoxTargets(kind); });
+  };
+  using K = marauder::fox::Kind;
+  if (!bluetooth) {
+    this->addNodes(&foxHuntMenu, "APs by SSID", TFTCYAN, WIFI, [this]() {
+      for (int i = 0; i < access_points->size(); ++i) { auto ap = access_points->get(i); ap.selected = false; access_points->set(i, ap); }
+      this->buildSSIDGroupMenu(SSIDMenuMode::FoxHunt); this->changeMenu(&ssidGroupMenu, true);
+    });
+    category("Stations", K::Station); category("WiFi Pineapples", K::Pineapple); category("MultiSSID", K::MultiSSID);
+  } else {
+    category("BLE devices", K::Ble); category("FindMy", K::FindMy); category("Flipper Zero", K::Flipper);
+    category("iBeacons", K::IBeacon); category("Meta", K::Meta); category("Flock", K::Flock);
+  }
+  this->changeMenu(&foxHuntMenu, true);
+}
+void MenuFunctions::closeFoxMenu() {
+  Menu* parent = foxHuntMenu.parentMenu ? foxHuntMenu.parentMenu : &wifiSnifferMenu;
+  this->changeMenu(parent, true);
+  foxHuntMenu.list->clear(); foxTargetsMenu.list->clear(); foxOptionsMenu.list->clear(); foxDetailsMenu.list->clear();
+  ssidGroupMenu.list->clear(); ssidAPMenu.list->clear();
+  fox_cleanup_pending = false;
+}
+void MenuFunctions::buildFoxOptions(Menu* returnMenu) {
+  fox_options_return = returnMenu;
+  foxOptionsMenu.name = "Fox Filters / Sort"; foxOptionsMenu.parentMenu = returnMenu;
+  foxOptionsMenu.list->clear();
+  const auto finish = [this]() { this->refreshFoxView(); };
+  this->addNodes(&foxOptionsMenu, "Back", TFTLIGHTGREY, 0, [this, returnMenu]() { this->changeMenu(returnMenu, true); });
+  const auto& options = fox_bluetooth ? fox_ble_options : fox_wifi_options;
+  this->addNodes(&foxOptionsMenu, options.recent ? "Recent: ON (30s)" : "Recent: OFF", TFTGREEN, 0, [this, finish]() {
+    auto& options = fox_bluetooth ? fox_ble_options : fox_wifi_options; options.recent = !options.recent; finish();
+  });
+  if (!fox_bluetooth) {
+    this->addNodes(&foxOptionsMenu, options.band == marauder::fox::Band::Any ? "Band: All [x]" : "Band: All", TFTGREEN, 0, [this, finish]() { fox_wifi_options.band = marauder::fox::Band::Any; finish(); });
+    this->addNodes(&foxOptionsMenu, options.band == marauder::fox::Band::GHz24 ? "Band: 2.4 GHz [x]" : "Band: 2.4 GHz", TFTGREEN, 0, [this, finish]() { fox_wifi_options.band = marauder::fox::Band::GHz24; finish(); });
+    this->addNodes(&foxOptionsMenu, options.band == marauder::fox::Band::GHz5 ? "Band: 5 GHz [x]" : "Band: 5 GHz", TFTGREEN, 0, [this, finish]() { fox_wifi_options.band = marauder::fox::Band::GHz5; finish(); });
+  }
+  const auto sortRow = [this, finish](const char* text, marauder::fox::Sort sort) {
+    const String label = String(text) + ((fox_bluetooth ? fox_ble_options : fox_wifi_options).sort == sort ? " [x]" : "");
+    this->addNodes(&foxOptionsMenu, label.c_str(), TFTCYAN, 0, [this, finish, sort]() {
+      (fox_bluetooth ? fox_ble_options : fox_wifi_options).sort = sort; finish();
+    });
+  };
+  sortRow("Sort: Strongest", marauder::fox::Sort::Signal); sortRow("Sort: Name/MAC", marauder::fox::Sort::Name);
+  if (!fox_bluetooth) sortRow("Sort: Channel", marauder::fox::Sort::Channel);
+  this->addNodes(&foxOptionsMenu, "Reset filters", TFTORANGE, 0, [this, finish]() {
+    (fox_bluetooth ? fox_ble_options : fox_wifi_options) = marauder::fox::Options(); finish();
+  });
+  this->changeMenu(&foxOptionsMenu, true);
+}
+void MenuFunctions::refreshFoxView() {
+  if (fox_options_return == &ssidGroupMenu) {
+    buildSSIDGroupMenu(SSIDMenuMode::FoxHunt); changeMenu(&ssidGroupMenu, true);
+  } else if (fox_options_return == &ssidAPMenu) {
+    ssidGroupMenu.list->clear();
+    buildSSIDAPMenu(fox_ssid_context, SSIDMenuMode::FoxHunt); changeMenu(&ssidAPMenu, true);
+  } else if (fox_options_return == &foxTargetsMenu) showFoxTargets(fox_kind);
+  else showFoxMenu(fox_bluetooth);
+}
+void MenuFunctions::showFoxTargets(marauder::fox::Kind kind) {
+  const bool bluetooth = static_cast<unsigned>(kind) >= static_cast<unsigned>(marauder::fox::Kind::Ble);
+  if (!foxHuntMenu.list->size() || fox_bluetooth != bluetooth) showFoxMenu(bluetooth);
+  fox_kind = kind; fox_bluetooth = bluetooth;
+  foxTargetsMenu.name = "Fox Hunt Targets"; foxTargetsMenu.parentMenu = &foxHuntMenu;
+  foxTargetsMenu.list->clear();
+  this->addNodes(&foxTargetsMenu, "Back", TFTLIGHTGREY, 0, [this]() { this->showFoxMenu(fox_bluetooth); });
+  this->addNodes(&foxTargetsMenu, "Filters / Sort", TFTCYAN, SETTINGS, [this]() { this->buildFoxOptions(&foxTargetsMenu); });
+  this->addNodes(&foxTargetsMenu, "Refresh", TFTGREEN, 0, [this]() { fox_options_return = &foxTargetsMenu; fox_refresh_pending = true; });
+  const auto options = fox_bluetooth ? fox_ble_options : fox_wifi_options;
+  const char* band = options.band == marauder::fox::Band::GHz24 ? "2.4G" : options.band == marauder::fox::Band::GHz5 ? "5G" : "All bands";
+  const String description = String(options.recent ? "30s " : "Any age ") + (fox_bluetooth ? "BLE" : band);
+  this->addNodes(&foxTargetsMenu, description.c_str(), TFTLIGHTGREY, 0, [](){});
+  unsigned count = 0, matched = 0;
+  const uint32_t now = millis();
+  for (unsigned i = 0; i < wifi_scan_obj.foxCandidateCount(kind); ++i) {
+    marauder::fox::Candidate item;
+    if (!wifi_scan_obj.foxCandidate(kind, i, item) || !marauder::fox::matches(item, options, now)) continue;
+    ++matched; marauder::fox::insertTop(fox_items, count, 40, item, options.sort);
+  }
+  for (unsigned i = 0; i < count; ++i) {
+    const auto candidate = fox_items[i];
+    const String label = String(candidate.rssi) + " " + candidate.name;
+    this->addNodes(&foxTargetsMenu, label.c_str(), rssiToMenuColor(candidate.rssi), candidate.bluetooth ? BLUETOOTH : WIFI,
+        [this, candidate]() {
+      if (candidate.kind == marauder::fox::Kind::Ble) {
+        if (candidate.source < static_cast<unsigned>(ble_devices->size()) &&
+            !memcmp(ble_devices->get(candidate.source).mac, candidate.mac, 6))
+          this->showBLETargetDetails(candidate.source, &foxTargetsMenu, true);
+      } else this->showFoxCandidate(candidate);
+    });
+  }
+  if (!count) this->addNodes(&foxTargetsMenu, "No matches - scan first", TFTORANGE, 0, [](){});
+  if (matched > count) this->addNodes(&foxTargetsMenu, "Showing best 40", TFTLIGHTGREY, 0, [](){});
+  Serial.printf("Fox targets: matched=%u shown=%u\n", matched, count);
+  this->changeMenu(&foxTargetsMenu, true);
+}
+void MenuFunctions::showFoxCandidate(const marauder::fox::Candidate& candidate) {
+  foxDetailsMenu.name = "Fox Hunt Target"; foxDetailsMenu.parentMenu = &foxTargetsMenu;
+  foxDetailsMenu.list->clear();
+  this->addNodes(&foxDetailsMenu, "Back", TFTLIGHTGREY, 0, [this]() { this->changeMenu(&foxTargetsMenu, true); });
+  this->addNodes(&foxDetailsMenu, candidate.name, TFTCYAN, DEVICE_INFO, [](){});
+  const String address = macToString(candidate.mac);
+  this->addNodes(&foxDetailsMenu, address.c_str(), TFTWHITE, DEVICE_INFO, [](){});
+  this->addNodes(&foxDetailsMenu, "Start Fox Hunt", TFTGREEN, SCANNERS, [this, candidate]() {
+    wifi_scan_obj.selectFoxTarget(candidate);
+    this->changeMenu(&foxHuntMenu, true);
+    wifi_scan_obj.StartScan(candidate.bluetooth ? BT_SCAN_FOX_HUNT : WIFI_SCAN_SIG_STREN, TFT_CYAN);
+  });
+  this->changeMenu(&foxDetailsMenu, true);
+}
+
+
+bool MenuFunctions::verifyFoxMenus() {
+  if (wifi_scan_obj.currentScanMode != WIFI_SCAN_OFF) return false;
+  LinkedList<AccessPoint> fixture;
+  for (unsigned i = 0; i < 3; ++i) {
+    AccessPoint ap{}; ap.essid = i == 2 ? "Other fixture" : "Fixture SSID";
+    ap.bssid[0] = 2; ap.bssid[5] = i + 1; ap.channel = i == 1 ? 36 : 6;
+    ap.rssi = -30 - i * 10; ap.last_seen_ms = millis(); fixture.add(ap);
+  }
+  LinkedList<AccessPoint>* original = access_points;
+  const auto saved = fox_wifi_options; const bool saved_bluetooth = fox_bluetooth;
+  access_points = &fixture; fox_bluetooth = false;
+  fox_wifi_options.band = marauder::fox::Band::GHz5; fox_wifi_options.recent = true;
+  buildSSIDGroupMenu(SSIDMenuMode::FoxHunt);
+  bool ok = ssidGroupMenu.list->size() == 3; // Back, options, one visible SSID.
+  ssidGroupMenu.list->get(2).callable();
+  ok &= fox_refresh_pending;
+  main(0); // Exercise the same deferred navigation used by the physical buttons.
+  ok &= ssidAPMenu.list->size() == 3; // Back, options, one matching 5 GHz BSSID.
+  ssidAPMenu.list->get(2).callable(); main(0);
+  ok &= fixture.get(1).selected && !fixture.get(0).selected && ssidAPMenu.list->size() == 4;
+  ssidAPMenu.list->get(2).callable(); main(0);
+  ok &= !fixture.get(1).selected && ssidAPMenu.list->size() == 3;
+  buildSSIDGroupMenu(SSIDMenuMode::Selection);
+  ok &= ssidGroupMenu.list->size() == 3; // Other workflows still see both SSIDs.
+  buildSSIDAPMenu("Fixture SSID", SSIDMenuMode::Selection);
+  ok &= ssidAPMenu.list->size() == 4; // Both BSSIDs plus Back and Select All.
+  access_points = original; fox_wifi_options = saved; fox_bluetooth = saved_bluetooth;
+  ssidGroupMenu.list->clear(); ssidAPMenu.list->clear();
+  showFoxMenu(false);
+  Serial.println(ok ? F("CHECK PASS: Fox hierarchy filters isolated from AP selection") : F("CHECK FAIL: Fox hierarchy filter isolation"));
+  return ok;
+}
+
+#ifdef HAS_NIMBLE_2
+void MenuFunctions::startFindMySniff() {
+  if (wifi_scan_obj.currentScanMode != WIFI_SCAN_OFF && wifi_scan_obj.currentScanMode != WIFI_CONNECTED)
+    wifi_scan_obj.StartScan(WIFI_SCAN_OFF);
+  if (current_menu != &wifiAPMenu || wifiAPMenu.name != "FindMy Attacks") showFindMyMenu();
+  findMyScanReturnPending = true;
+  display_obj.clearScreen(); drawStatusBar();
+  wifi_scan_obj.StartScan(BT_SCAN_AIRTAG,TFT_WHITE);
+}
+bool MenuFunctions::restoreFindMyAfterSniff() {
+  if (!findMyScanReturnPending) return false;
+  if (current_menu != &wifiAPMenu || wifiAPMenu.name != "FindMy Attacks") {
+    findMyScanReturnPending = false; return false;
+  }
+  if (wifi_scan_obj.currentScanMode == BT_SCAN_AIRTAG) return false;
+  findMyScanReturnPending = false;
+  if (wifi_scan_obj.currentScanMode != WIFI_SCAN_OFF) return false;
+  showFindMyMenu();
+  Serial.printf("FindMy Sniff returned to FindMy Attacks: %d targets\n",airtags->size());
+  return true;
+}
+void MenuFunctions::showFindMyMenu() {
+  findMyScanReturnPending = false;
+  wifiAPMenu.name = "FindMy Attacks";
+  wifiAPMenu.parentMenu = &bluetoothAttackMenu; wifiAPMenu.list->clear();
+  addNodes(&wifiAPMenu,"Back",TFTLIGHTGREY,0,[this]() { changeMenu(&bluetoothAttackMenu,true); });
+  for (int i=0;i<airtags->size();++i) {
+    const auto item=airtags->get(i);
+    const String address=item.mac;
+    const String label=String(item.rssi)+" "+address;
+    addNodes(&wifiAPMenu,label.c_str(),rssiToMenuColor(item.rssi),BLUETOOTH,[this,i,address]() {
+      if (i>=airtags->size() || airtags->get(i).mac!=address) { showFindMyMenu(); return; }
+      showFindMyTarget(i);
+    });
+  }
+  if (!airtags->size()) addNodes(&wifiAPMenu,"Run FindMy Sniff",TFTORANGE,BLUETOOTH_SNIFF,[this]() { startFindMySniff(); });
+  changeMenu(&wifiAPMenu,true);
+}
+void MenuFunctions::showFindMyTarget(int index) {
+  if (index<0 || index>=airtags->size()) { showFindMyMenu(); return; }
+  findMyTargetAddress=airtags->get(index).mac;
+  findMyActionsMenu.name="FindMy Target"; findMyActionsMenu.parentMenu=&wifiAPMenu;
+  findMyActionsMenu.list->clear();
+  addNodes(&findMyActionsMenu,"Back",TFTLIGHTGREY,0,[this]() { showFindMyMenu(); });
+  addNodes(&findMyActionsMenu,findMyTargetAddress.c_str(),TFTCYAN,DEVICE_INFO,[](){});
+  addNodes(&findMyActionsMenu,"Test Connection",TFTGREEN,SCANNERS,[this]() { runFindMyAction(true); });
+  addNodes(&findMyActionsMenu,"Play Sound",TFTORANGE,ATTACKS,[this]() { runFindMyAction(false); });
+  addNodes(&findMyActionsMenu,"Last Result",TFTCYAN,DEVICE_INFO,[this]() { showFindMyResult(); });
+  changeMenu(&findMyActionsMenu,true);
+}
+void MenuFunctions::runFindMyAction(bool testOnly) {
+  bool found=false;
+  for (int i=0;i<airtags->size();++i) {
+    auto item=airtags->get(i); item.selected=item.mac==findMyTargetAddress;
+    found|=item.selected; airtags->set(i,item);
+  }
+  if (!found) { showFindMyMenu(); return; }
+  wifi_scan_obj.executeFindMySound(true,testOnly);
+  showFindMyResult();
+}
+bool MenuFunctions::verifyFindMyMenus() {
+  if (wifi_scan_obj.currentScanMode != WIFI_SCAN_OFF) return false;
+  LinkedList<AirTag> fixture; AirTag item; item.mac="02:00:00:00:00:01"; item.rssi=-42;
+  auto* original=airtags; airtags=&fixture;
+  showFindMyMenu();
+  bool ok=wifiAPMenu.list->size()==2 && wifiAPMenu.list->get(1).name=="Run FindMy Sniff";
+  // Exercise the return handler with empty and populated isolated discovery
+  // lists. Scan modes are inspected here; these fixtures do not start RF.
+  findMyScanReturnPending=true;
+  ok &= restoreFindMyAfterSniff() && !findMyScanReturnPending && current_menu==&wifiAPMenu;
+  ok &= wifiAPMenu.list->size()==2 && wifiAPMenu.list->get(1).name=="Run FindMy Sniff";
+  findMyScanReturnPending=true; wifi_scan_obj.currentScanMode=BT_SCAN_AIRTAG;
+  ok &= !restoreFindMyAfterSniff() && findMyScanReturnPending;
+  wifi_scan_obj.currentScanMode=BT_SCAN_ALL;
+  ok &= !restoreFindMyAfterSniff() && !findMyScanReturnPending;
+  wifi_scan_obj.currentScanMode=WIFI_SCAN_OFF;
+  ok &= !restoreFindMyAfterSniff();
+  findMyScanReturnPending=true; changeMenu(&bluetoothAttackMenu,true);
+  ok &= !restoreFindMyAfterSniff() && !findMyScanReturnPending && current_menu==&bluetoothAttackMenu;
+  showFindMyMenu();
+  fixture.add(item); findMyScanReturnPending=true;
+  ok &= restoreFindMyAfterSniff() && current_menu==&wifiAPMenu;
+  ok &= wifiAPMenu.list->size()==2 && wifiAPMenu.list->get(1).name.indexOf(item.mac)>=0;
+  Serial.println(ok ? F("CHECK PASS: FindMy scan launcher and empty/populated return routing") : F("CHECK FAIL: FindMy scan return routing"));
+  wifiAPMenu.list->get(1).callable();
+  ok &= current_menu==&findMyActionsMenu && findMyActionsMenu.list->size()==5;
+  ok &= findMyActionsMenu.list->get(2).name=="Test Connection" && findMyActionsMenu.list->get(3).name=="Play Sound";
+  findMyActionsMenu.list->get(4).callable();
+  ok &= current_menu==&findMyResultMenu && findMyResultMenu.list->size()>10;
+  findMyResultMenu.list->get(0).callable();
+  ok &= current_menu==&findMyActionsMenu;
+  findMyActionsMenu.list->get(0).callable(); wifiAPMenu.list->get(0).callable();
+  airtags=original;
+  wifiAPMenu.list->clear(); findMyActionsMenu.list->clear(); findMyResultMenu.list->clear(); findMyTargetAddress="";
+  Serial.println(ok ? F("CHECK PASS: FindMy test/sound actions and persistent result navigation") : F("CHECK FAIL: FindMy diagnostic menu navigation"));
+  return ok;
+}
+void MenuFunctions::showFindMyResult(bool fixture) {
+  using namespace marauder::tracker;
+  auto r=wifi_scan_obj.trackerReport();
+  if (fixture) {
+    r=Report(); r.testOnly=true; r.stage=Stage::Connect; r.result=Result::ConnectFailed;
+    strcpy(r.address,"02:00:00:00:00:01"); r.error=13; r.connectMs=15000; r.elapsedMs=15100;
+    r.advertisementKnown=true; r.advertisedConnectable=false; r.scanAge=1200; r.rssi=-42; r.addressType=1;
+  }
+  findMyResultMenu.name=fixture ? "TEST FindMy Result" : "FindMy Result";
+  findMyResultMenu.parentMenu=&findMyActionsMenu; findMyResultMenu.list->clear();
+  addNodes(&findMyResultMenu,"Back",TFTLIGHTGREY,0,[this]() {
+    if (findMyActionsMenu.list->size()) changeMenu(&findMyActionsMenu,true); else showFindMyMenu();
+  });
+  const auto row=[this](const String& text,uint8_t color=TFTCYAN) { addNodes(&findMyResultMenu,text.c_str(),color,DEVICE_INFO,[](){}); };
+  row(resultName(r.result),r.result==Result::Ready || r.result==Result::SoundSent ? TFTGREEN : TFTORANGE);
+  row(String("Stage: ")+stageName(r.stage));
+  row("Error: "+String(r.error)+" 0x"+String(r.error,HEX)); row(errorName(r.error));
+  row("BLE link: "+String(r.linkEstablished ? "established" : "not established"));
+  row("Connect: "+String(r.connectMs)+"ms"); row("Total: "+String(r.elapsedMs)+"ms");
+  row(r.address); row("Address type: "+String(r.addressType));
+  row("AD connectable: "+String(r.advertisementKnown ? r.advertisedConnectable ? "yes" : "no" : "unknown"));
+  row(r.scanAge==UINT32_MAX ? "Scan age: unknown" : "Scan age: "+String(r.scanAge/1000.0f,1)+"s");
+  row("RSSI: "+String(r.rssi)+"dBm");
+  row("Services: "+String(r.services)); row("GATT chars: "+String(r.characteristics)); row(profileName(r.profile));
+  row(r.testOnly ? "Test only: no sound" : "Sound action requested");
+  row(r.cleanupPending ? "Cleanup pending" : "Cleanup complete");
+  if (r.result==Result::ConnectFailed) { row("Check fresh scan / range"); row("Owner nearby: possible"); }
+  changeMenu(&findMyResultMenu,true);
+}
 #endif
 
-
-
+#endif

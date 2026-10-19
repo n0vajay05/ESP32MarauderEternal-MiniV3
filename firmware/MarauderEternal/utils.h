@@ -8,6 +8,7 @@
 
 #include "configs.h"
 #include "MarauderMacAddress.h"
+#include "IPv4Range.h"
 
 #include "esp_heap_caps.h"
 #include "mbedtls/base64.h"
@@ -21,6 +22,8 @@ struct Station {
   bool selected;
   uint16_t packets;
   uint16_t ap;
+  int8_t rssi = -128;
+  uint32_t last_seen_ms = 0;
 };
 
 struct ProbeReqSsid {
@@ -193,50 +196,29 @@ inline void convertMacStringToUint8(const String& macStr, uint8_t macAddr[6]) {
 }
 
 
-inline IPAddress getNextIP(IPAddress currentIP, IPAddress subnetMask) {
-  // Convert IPAddress to uint32_t
-  uint32_t ipInt = (currentIP[0] << 24) | (currentIP[1] << 16) | (currentIP[2] << 8) | currentIP[3];
-  uint32_t maskInt = (subnetMask[0] << 24) | (subnetMask[1] << 16) | (subnetMask[2] << 8) | subnetMask[3];
-
-  uint32_t networkBase = ipInt & maskInt;
-  uint32_t broadcast = networkBase | ~maskInt;
-
-  uint32_t nextIP = ipInt + 1;
-
-  if (nextIP <= networkBase) {
-    nextIP = networkBase + 1;
-  }
-  if (nextIP >= broadcast) {
-    return IPAddress(0, 0, 0, 0); // no more IPs
-  }
-
-  return IPAddress(
-    (nextIP >> 24) & 0xFF,
-    (nextIP >> 16) & 0xFF,
-    (nextIP >> 8) & 0xFF,
-    nextIP & 0xFF
-  );
+inline uint32_t ipAddressToUint32(const IPAddress& address) {
+  return (static_cast<uint32_t>(address[0]) << 24) |
+         (static_cast<uint32_t>(address[1]) << 16) |
+         (static_cast<uint32_t>(address[2]) << 8) | address[3];
 }
 
-inline IPAddress getPrevIP(IPAddress currentIP, IPAddress subnetMask, uint16_t stepsBack) {
-  // Convert IPAddress to uint32_t
-  uint32_t ipInt = (currentIP[0] << 24) | (currentIP[1] << 16) | (currentIP[2] << 8) | currentIP[3];
-  uint32_t maskInt = (subnetMask[0] << 24) | (subnetMask[1] << 16) | (subnetMask[2] << 8) | subnetMask[3];
+inline IPAddress uint32ToIPAddress(uint32_t address) {
+  return IPAddress((address >> 24) & 0xff, (address >> 16) & 0xff,
+                   (address >> 8) & 0xff, address & 0xff);
+}
 
-  uint32_t networkBase = ipInt & maskInt;
-  uint32_t prevIP = ipInt - stepsBack;
+inline IPAddress getNextIP(const IPAddress& address, const IPAddress& mask) {
+  const auto range = marauder::ipv4HostRange(ipAddressToUint32(address),
+                                            ipAddressToUint32(mask));
+  return uint32ToIPAddress(marauder::nextIPv4Host(ipAddressToUint32(address), range));
+}
 
-  // Ensure prevIP is not below the usable range
-  if (prevIP <= networkBase) {
-    return IPAddress(0, 0, 0, 0);  // No more IPs
-  }
-
-  return IPAddress(
-    (prevIP >> 24) & 0xFF,
-    (prevIP >> 16) & 0xFF,
-    (prevIP >> 8) & 0xFF,
-    prevIP & 0xFF
-  );
+inline IPAddress getPrevIP(const IPAddress& address, const IPAddress& mask,
+                          uint16_t stepsBack) {
+  const auto range = marauder::ipv4HostRange(ipAddressToUint32(address),
+                                            ipAddressToUint32(mask));
+  return uint32ToIPAddress(marauder::previousIPv4Host(
+      ipAddressToUint32(address), stepsBack, range));
 }
 
 inline uint16_t getNextPort(uint16_t port) {

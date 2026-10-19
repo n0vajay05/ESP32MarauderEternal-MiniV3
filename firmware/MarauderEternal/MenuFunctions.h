@@ -201,6 +201,17 @@ class MenuFunctions
     #endif*/
     Menu wifiGeneralMenu;
     Menu wifiAPMenu;
+    Menu iBeaconMenu;
+    Menu iBeaconInfoMenu;
+    Menu geofenceMenu;
+    Menu geofenceActionMenu;
+    Menu geofenceRadiusMenu;
+    geofences::Config pendingGeofence;
+    unsigned pendingGeofenceSlot = 0;
+    void showGeofenceActions(unsigned slot);
+    void editGeofence(unsigned slot, bool current);
+    Menu savedWifiMenu;
+    Menu savedWifiActionsMenu;
     Menu ssidGroupMenu;
     Menu ssidAPMenu;
     Menu stationSSIDMenu;
@@ -230,6 +241,13 @@ class MenuFunctions
     Menu bleTargetMenu;
     Menu bleTargetDetailsMenu;
     Menu bleConfirmMenu;
+    Menu findMyActionsMenu;
+    Menu findMyResultMenu;
+    String findMyTargetAddress;
+    bool findMyScanReturnPending = false;
+    bool restoreFindMyAfterSniff();
+    void showFindMyTarget(int index);
+    void runFindMyAction(bool testOnly);
 
     // Settings things menus
     Menu generateSSIDsMenu;
@@ -240,6 +258,22 @@ class MenuFunctions
     String selectedEvilPortalSSID = "";
 
     Menu foxHuntMenu;
+    Menu foxTargetsMenu;
+    Menu foxOptionsMenu;
+    Menu foxDetailsMenu;
+    bool fox_bluetooth = false;
+    bool fox_refresh_pending = false;
+    bool fox_cleanup_pending = false;
+    Menu* fox_options_return = nullptr;
+    marauder::fox::Kind fox_kind = marauder::fox::Kind::Ble;
+    marauder::fox::Options fox_wifi_options, fox_ble_options;
+    marauder::fox::Candidate fox_items[40];
+    String fox_ssid_context;
+    void buildFoxOptions(Menu* returnMenu);
+    void refreshFoxView();
+    bool foxAPVisible(const AccessPoint& ap);
+    void showFoxCandidate(const marauder::fox::Candidate& candidate);
+
 
     #ifdef HAS_DIRECT_UPLOAD
       Menu deleteAllMenu;
@@ -324,6 +358,21 @@ class MenuFunctions
     #endif
 
   public:
+    void showSavedWifiMenu(bool replace = false);
+    void showGeofenceMenu();
+    void showIBeaconMenu();
+    #ifdef HAS_NIMBLE_2
+      void showFindMyMenu();
+      void startFindMySniff();
+      bool verifyFindMyMenus();
+      void showFindMyResult(bool fixture = false);
+    #endif
+    void showFoxMenu(bool bluetooth);
+    void closeFoxMenu();
+    bool verifyFoxMenus();
+    marauder::fox::Options foxFilters(bool bluetooth) const { return bluetooth ? fox_ble_options : fox_wifi_options; }
+    void showFoxTargets(marauder::fox::Kind kind);
+    void configureFoxFilters(bool bluetooth, marauder::fox::Band band, bool recent, marauder::fox::Sort sort);
     Menu* current_menu;
     Menu clearSSIDsMenu;
     Menu clearAPsMenu;

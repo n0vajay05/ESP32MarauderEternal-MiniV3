@@ -655,7 +655,7 @@ void EvilPortal::sendToDisplay(String msg) {
   #ifdef HAS_SCREEN
     msg.trim();
     display_obj.loading = true;
-    display_obj.display_buffer->add(msg);
+    display_obj.queueLine(msg);
     display_obj.loading = false;
   #endif
 }

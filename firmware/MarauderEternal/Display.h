@@ -4,10 +4,13 @@
 #define Display_h
 
 #include "configs.h"
+#include "MemoryGuard.h"
 
 #ifdef HAS_SCREEN
 
 #include <FS.h>
+#include "freertos/FreeRTOS.h"
+#include "freertos/semphr.h"
 #include <functional>
 #include <LinkedList.h>
 #include <SPI.h>
@@ -66,6 +69,11 @@
 class Display
 {
   private:
+    marauder::QueueBackpressureState display_queue_pressure{DISPLAY_BUFFER_LIMIT};
+    StaticSemaphore_t display_queue_mutex_storage;
+    SemaphoreHandle_t display_queue_mutex = nullptr;
+    LinkedList<String>* display_buffer = nullptr;
+    bool takeQueuedLine(String& line);
     bool SwitchOn = false;
     
     bool run_setup = true;
@@ -106,7 +114,9 @@ class Display
     uint8_t print_delay_1, print_delay_2 = 10;
     uint8_t current_banner_pos = SCREEN_WIDTH;
 
-    LinkedList<String>* display_buffer;
+    bool queueLine(const String& line);
+    void clearQueuedLines();
+    int queuedLineCount();
 
     #ifdef SCREEN_BUFFER
       LinkedList<String>* screen_buffer;

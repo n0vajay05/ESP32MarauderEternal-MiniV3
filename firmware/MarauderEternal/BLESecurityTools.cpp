@@ -1,4 +1,5 @@
 #include "BLESecurityTools.h"
+#include "BLEClientLifecycle.h"
 
 #if defined(HAS_BT) && defined(HAS_NIMBLE_2)
 
@@ -952,15 +953,11 @@ void waitForReturn() {
 #endif
 }
 
-void closeBLEClient(NimBLEClient*& client) {
-  if (client) {
-    if (client->isConnected())
-      client->disconnect();
-    NimBLEDevice::deleteClient(client);
-    client = nullptr;
-  }
+bool closeBLEClient(NimBLEClient*& client) {
+  if (!marauder::releaseNimbleClient(client)) return false;
   if (NimBLEDevice::isInitialized())
-    NimBLEDevice::deinit(true);
+    return NimBLEDevice::deinit(true);
+  return true;
 }
 
 bool targetReady(String& error, bool requireConnectable) {
@@ -1159,11 +1156,17 @@ void inspectTarget() {
                , logStatus
 #endif
     );
-    NimBLEDevice::init("Marauder-Discovery");
+    NimBLEClient* client = nullptr;
+    const bool ready = closeBLEClient(client) &&
+                       NimBLEDevice::init("Marauder-Discovery");
     NimBLEDevice::setSecurityAuth(false, false, false);
-    NimBLEClient* client = NimBLEDevice::createClient();
-    if (!client) {
-      outcome = F("error: cannot create BLE client");
+    if (ready) {
+      client = NimBLEDevice::getDisconnectedClient();
+      if (!client) client = NimBLEDevice::createClient();
+      if (client) client->setSelfDelete(false, false);
+    }
+    if (!ready || !client) {
+      outcome = F("error: BLE client unavailable or cleanup pending");
       closeBLEClient(client);
     }
     else {

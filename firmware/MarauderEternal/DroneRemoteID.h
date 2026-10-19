@@ -3,6 +3,8 @@
 
 #include <stdint.h>
 
+class TFT_eSprite;
+
 namespace DroneRemoteID {
 
 constexpr uint8_t CAPTURED_MESSAGE_TYPES = 6;
@@ -23,7 +25,11 @@ struct CapturedDrone {
 
 // Passively receives and decodes ASTM/OpenDroneID broadcasts carried in BLE
 // service data, Wi-Fi Beacon vendor IEs, and Wi-Fi NAN service descriptors.
-void run();
+void run(uint32_t durationMs = 0);
+void printRetained();
+bool exportRetained();
+void runChecks();
+bool renderPreview(TFT_eSprite& frame, uint8_t page = 5);
 
 // Shows the retained results from the most recent scan and copies the selected
 // drone's last observed message of each type into `target`.

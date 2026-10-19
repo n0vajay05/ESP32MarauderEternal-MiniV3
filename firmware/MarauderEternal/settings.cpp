@@ -47,33 +47,40 @@ bool Settings::_commitDocument(DynamicJsonDocument& json,
     return false;
 
   serialized = "";
-  if (serializeJson(json, serialized) == 0)
+  const size_t expected_bytes = measureJson(json);
+  if (!expected_bytes || serializeJson(json, serialized) != expected_bytes)
     return false;
 
-  SPIFFS.remove("/settings.tmp");
-  File temporary = SPIFFS.open("/settings.tmp", FILE_WRITE);
-  if (!temporary || serializeJson(json, temporary) == 0 ||
-      temporary.getWriteError()) {
-    temporary.close();
-    SPIFFS.remove("/settings.tmp");
-    return false;
-  }
+  SPIFFS.remove((String(path_) + ".tmp"));
+  File temporary = SPIFFS.open((String(path_) + ".tmp"), FILE_WRITE);
+  const size_t written = temporary ? serializeJson(json, temporary) : 0;
+  if (temporary) temporary.flush(); // VFS size uses fstat; flush stdio first.
+  const size_t file_bytes = temporary ? temporary.size() : 0;
+  const bool complete = temporary && written == expected_bytes &&
+                        !temporary.getWriteError() && file_bytes == expected_bytes;
   temporary.close();
+  if (!complete) {
+    Serial.printf("Settings write failed: %u/%u bytes, file size %u\n",
+                  static_cast<unsigned>(written), static_cast<unsigned>(expected_bytes),
+                  static_cast<unsigned>(file_bytes));
+    SPIFFS.remove((String(path_) + ".tmp"));
+    return false;
+  }
 
-  SPIFFS.remove("/settings.backup");
-  const bool had_settings = SPIFFS.exists("/settings.json");
+  SPIFFS.remove((String(path_) + ".backup"));
+  const bool had_settings = SPIFFS.exists(path_);
   if (had_settings &&
-      !SPIFFS.rename("/settings.json", "/settings.backup")) {
-    SPIFFS.remove("/settings.tmp");
+      !SPIFFS.rename(path_, (String(path_) + ".backup"))) {
+    SPIFFS.remove((String(path_) + ".tmp"));
     return false;
   }
-  if (!SPIFFS.rename("/settings.tmp", "/settings.json")) {
+  if (!SPIFFS.rename((String(path_) + ".tmp"), path_)) {
     if (had_settings)
-      SPIFFS.rename("/settings.backup", "/settings.json");
-    SPIFFS.remove("/settings.tmp");
+      SPIFFS.rename((String(path_) + ".backup"), path_);
+    SPIFFS.remove((String(path_) + ".tmp"));
     return false;
   }
-  SPIFFS.remove("/settings.backup");
+  SPIFFS.remove((String(path_) + ".backup"));
   return true;
 }
 
@@ -82,16 +89,18 @@ bool Settings::_commitDocument(DynamicJsonDocument& json,
 String Settings::getSettingsString() { return this->json_settings_string; }
 
 bool Settings::begin() {
-  if (!SPIFFS.begin(FORMAT_SPIFFS_IF_FAILED)) {
+  if (!SPIFFS.begin(strcmp(path_, "/settings.json") == 0 && FORMAT_SPIFFS_IF_FAILED)) {
     return false;
   }
 
   File settingsFile;
+  if (!SPIFFS.exists(path_) && SPIFFS.exists(String(path_) + ".backup"))
+    SPIFFS.rename(String(path_) + ".backup", path_);
 
-  // SPIFFS.remove("/settings.json"); // NEED TO REMOVE THIS LINE
+  // SPIFFS.remove(path_); // NEED TO REMOVE THIS LINE
 
-  if (SPIFFS.exists("/settings.json")) {
-    settingsFile = SPIFFS.open("/settings.json", FILE_READ);
+  if (SPIFFS.exists(path_)) {
+    settingsFile = SPIFFS.open(path_, FILE_READ);
 
     if (!settingsFile) {
       settingsFile.close();
@@ -113,8 +122,9 @@ bool Settings::begin() {
   settingsFile.close();
   if (error) {
     Serial.println(error.f_str());
-    SPIFFS.remove("/settings.corrupt");
-    SPIFFS.rename("/settings.json", "/settings.corrupt");
+    if (error == DeserializationError::NoMemory) return false;
+    SPIFFS.remove((String(path_) + ".corrupt"));
+    SPIFFS.rename(path_, (String(path_) + ".corrupt"));
     return this->createDefaultSettings(SPIFFS);
   }
 
@@ -167,6 +177,9 @@ bool Settings::begin() {
   addString("wu");
   addString("wt");
   addString(WDG_KEY_NAME);
+
+  migrated = saved_wifi::migrate(jsonBuffer) || migrated;
+  migrated = geofences::migrate(jsonBuffer) || migrated;
 
   if (jsonBuffer.overflowed()) {
     Serial.println(F("Settings migration exceeded JSON capacity"));
@@ -364,7 +377,7 @@ template <> bool Settings::saveSetting<bool>(const char* key, bool value) {
       else if (strcmp(key, "ChanHop") == 0)
         _cache.ChanHop = value;
 
-      this->printJsonSettings(settings_string);
+      // Routine updates never print credentials or tokens.
 
       return true;
     }
@@ -408,7 +421,7 @@ template <> bool Settings::saveSetting<bool>(const char* key, String value) {
       else if (strcmp(key, WDG_KEY_NAME) == 0)
         _cache.wdg_key = value;
 
-      this->printJsonSettings(settings_string);
+      // Routine updates never print credentials or tokens.
 
       return true;
     }
@@ -484,7 +497,11 @@ void Settings::printJsonSettings(String json_string) {
   for (int i = 0; i < (int)json["Settings"].size(); i++) {
     Serial.println("Name: " + json["Settings"][i]["name"].as<String>());
     Serial.println("Type: " + json["Settings"][i]["type"].as<String>());
-    Serial.println("Value: " + json["Settings"][i]["value"].as<String>() + "\n");
+    const String name = json["Settings"][i]["name"].as<String>();
+    const bool secret = name == "ClientPW" || name == "SavedWiFi" ||
+                        name == "wt" || name == WDG_KEY_NAME;
+    Serial.println("Value: " + (secret ? String("[redacted]") :
+                   json["Settings"][i]["value"].as<String>()) + "\n");
   }
 }
 
@@ -493,13 +510,7 @@ void Settings::printJsonSettings(String json_string) {
 // ---------------------------------------------------------------------------
 
 bool Settings::createDefaultSettings(fs::FS &fs, bool spec, uint8_t index, const char* typeStr, const char* name) {
-  File settingsFile = fs.open("/settings.json", FILE_WRITE);
-
-  if (!settingsFile) {
-    // Serial.println(F("Failed to create settings file"));
-    return false;
-  }
-
+  (void)fs;
   String settings_string;
 
   if (!spec) {
@@ -571,13 +582,13 @@ bool Settings::createDefaultSettings(fs::FS &fs, bool spec, uint8_t index, const
     jsonBuffer["Settings"][10]["range"]["min"] = "";
     jsonBuffer["Settings"][10]["range"]["max"] = "";
 
-    serializeJson(jsonBuffer, settingsFile);
-    serializeJson(jsonBuffer, settings_string);
+    saved_wifi::migrate(jsonBuffer);
+    geofences::migrate(jsonBuffer);
+    if (!_commitDocument(jsonBuffer, settings_string)) return false;
   } else {
     DynamicJsonDocument json(JSON_SETTING_SIZE);
 
     if (deserializeJson(json, this->json_settings_string)) {
-      settingsFile.close();
       return false;
     }
 
@@ -588,8 +599,7 @@ bool Settings::createDefaultSettings(fs::FS &fs, bool spec, uint8_t index, const
       json["Settings"][index]["range"]["min"] = false;
       json["Settings"][index]["range"]["max"] = true;
 
-      serializeJson(json, settings_string);
-      serializeJson(json, settingsFile);
+      if (!_commitDocument(json, settings_string)) return false;
     } else if (strcmp(typeStr, "String") == 0) {
       json["Settings"][index]["name"] = name;
       json["Settings"][index]["type"] = typeStr;
@@ -597,19 +607,88 @@ bool Settings::createDefaultSettings(fs::FS &fs, bool spec, uint8_t index, const
       json["Settings"][index]["range"]["min"] = "";
       json["Settings"][index]["range"]["max"] = "";
 
-      serializeJson(json, settings_string);
-      serializeJson(json, settingsFile);
+      if (!_commitDocument(json, settings_string)) return false;
     }
   }
 
-  settingsFile.close();
 
   this->json_settings_string = settings_string;
 
   // Rebuild cache from the newly written settings.
   this->_buildCache();
 
-  this->printJsonSettings(settings_string);
 
+
+  return true;
+}
+
+unsigned Settings::getSavedWifiCount() {
+  DynamicJsonDocument doc(JSON_SETTING_SIZE);
+  if (deserializeJson(doc, json_settings_string)) return 0;
+  return min(static_cast<unsigned>(saved_wifi::profiles(doc).size()), saved_wifi::kMaxProfiles);
+}
+bool Settings::loadSavedWifiCredential(unsigned index, String& ssid, String& password) {
+  ssid = ""; password = "";
+  DynamicJsonDocument doc(JSON_SETTING_SIZE);
+  saved_wifi::Profile profile;
+  if (deserializeJson(doc, json_settings_string) || !saved_wifi::read(doc, index, profile)) return false;
+  ssid = profile.ssid; password = profile.password;
+  return true;
+}
+saved_wifi::Result Settings::saveWifiCredential(const String& ssid, const String& password, int replace) {
+  DynamicJsonDocument doc(JSON_SETTING_SIZE);
+  if (deserializeJson(doc, json_settings_string)) return saved_wifi::Error;
+  auto result = saved_wifi::save(doc, ssid.c_str(), password.c_str(), replace);
+  if (result == saved_wifi::Error || result == saved_wifi::Full) return result;
+  String serialized;
+  if (!_commitDocument(doc, serialized)) return saved_wifi::Error;
+  json_settings_string = serialized;
+  _buildCache();
+  return result;
+}
+bool Settings::removeSavedWifiCredential(unsigned index) {
+  DynamicJsonDocument doc(JSON_SETTING_SIZE);
+  if (deserializeJson(doc, json_settings_string) || !saved_wifi::remove(doc, index)) return false;
+  String serialized;
+  if (!_commitDocument(doc, serialized)) return false;
+  json_settings_string = serialized;
+  _buildCache();
+  return true;
+}
+bool Settings::markSavedWifiSuccessful(unsigned index) {
+  if (index == 0) return index < getSavedWifiCount();
+  String ssid, password;
+  return loadSavedWifiCredential(index, ssid, password) &&
+         saveWifiCredential(ssid, password) == saved_wifi::Updated;
+}
+
+bool Settings::loadGeofence(unsigned index, geofences::Config& fence) {
+  DynamicJsonDocument doc(JSON_SETTING_SIZE);
+  if (deserializeJson(doc, json_settings_string)) { fence = geofences::Config(); return false; }
+  return geofences::load(doc, index, fence);
+}
+bool Settings::saveGeofence(unsigned index, const geofences::Config& fence) {
+  DynamicJsonDocument doc(JSON_SETTING_SIZE);
+  if (deserializeJson(doc, json_settings_string) || !geofences::save(doc, index, fence)) return false;
+  String serialized;
+  if (!_commitDocument(doc, serialized)) return false;
+  json_settings_string = serialized;
+  return true;
+}
+bool Settings::clearGeofence(unsigned index) {
+  DynamicJsonDocument doc(JSON_SETTING_SIZE);
+  if (deserializeJson(doc, json_settings_string) || !geofences::remove(doc, index)) return false;
+  String serialized;
+  if (!_commitDocument(doc, serialized)) return false;
+  json_settings_string = serialized;
+  return true;
+}
+
+bool Settings::loadGeofences(geofences::Config* fences) {
+  if (!fences) return false;
+  DynamicJsonDocument doc(JSON_SETTING_SIZE);
+  if (deserializeJson(doc, json_settings_string) ||
+      !geofences::setting(doc)["value"].is<JsonArray>()) return false;
+  for (unsigned i = 0; i < geofences::kMax; ++i) geofences::load(doc, i, fences[i]);
   return true;
 }

@@ -4,7 +4,16 @@
 #define WiFiScan_h
 
 #include "configs.h"
+#include "Geofences.h"
+#include "GpsTrackerStats.h"
+#include "FoxHunt.h"
+#include "TrackerDiagnostics.h"
+#include "FindMyScanTimer.h"
+#include "FoxHuntDashboard.h"
+#include "GpsTrackerDashboard.h"
+#include <atomic>
 #include "utils.h"
+#include "MemoryGuard.h"
 #include "WiFiCameraDetector.h"
 
 #include <ArduinoJson.h>
@@ -33,9 +42,12 @@
 #include "mbedtls/bignum.h"
 #include "mbedtls/ctr_drbg.h"
 #include "mbedtls/ecp.h"
-#ifndef HAS_IDF_3
-  #include <lwip/etharp.h>
-  #include <lwip/ip_addr.h>
+#include <lwip/etharp.h>
+#include <lwip/ip_addr.h>
+#include <lwip/tcpip.h>
+#ifdef HAS_IDF_3
+  #include "esp_netif.h"
+  #include "esp_netif_net_stack.h"
 #endif
 #ifdef HAS_IDF_3
   #include "esp_system.h"
@@ -289,6 +301,7 @@ struct AirTag {
     bool is_fmna     = false;
     bool is_dult     = false;
     bool connectable = true;
+    bool connectability_known = false;
     #ifdef HAS_BT
     NimBLEAddress device_address;
     #endif
@@ -317,6 +330,8 @@ struct BleDevice {
   uint8_t  scanResponseData[31] = {};
   uint8_t  scanResponseLength = 0;
   bool     advertisementTruncated = false;
+  uint32_t last_seen_ms = 0;
+  uint8_t fox_flags = 0;
 };
 
 #ifdef HAS_PSRAM
@@ -334,6 +349,9 @@ class WiFiScan
   private:
     // Wardriver thanks to https://github.com/JosephHewitt
     int arp_count = 0;
+    marauder::IPv4HostCursor network_scan_cursor;
+    IPAddress pending_arp_ips[10];
+    IPAddress advanceScanIP();
     #ifndef HAS_PSRAM
       struct mac_addr mac_history[mac_history_len];
     #endif
@@ -385,6 +403,7 @@ class WiFiScan
     //int num_deauth = 0; // RED
 
     uint32_t initTime = 0;
+    marauder::tracker::ScanTimer findmy_scan_timer;
     uint32_t last_ui_update = 0;
     uint32_t last_sour_apple_update = 0;
     #if defined(MARAUDER_MINI_V3) && defined(HAS_GPS)
@@ -482,7 +501,8 @@ class WiFiScan
       NimBLEScan* pBLEScan;
     #endif
     #ifdef HAS_NIMBLE_2
-      NimBLEClient* nimbleClient;
+      NimBLEClient* nimbleClient = nullptr;
+      marauder::tracker::Report tracker_report;
     #endif
 
     const char* rick_roll[8] = {
@@ -548,6 +568,7 @@ class WiFiScan
         uint8_t channel;
         int8_t rssi;
         bool displayed;
+        uint32_t last_seen_ms = 0;
     };
     LinkedList<PineScanTracker>* pinescan_trackers;
     LinkedList<ConfirmedPineScan>* confirmed_pinescan;
@@ -593,6 +614,7 @@ class WiFiScan
         int8_t rssi;
         uint8_t ssid_count;
         bool displayed;
+        uint32_t last_seen_ms = 0;
     };
     LinkedList<MultiSSIDTracker>* multissid_trackers;
     LinkedList<ConfirmedMultiSSID>* confirmed_multissid;
@@ -739,12 +761,12 @@ class WiFiScan
 
     #ifdef HAS_NIMBLE_2
       int connectAndProcessTracker(NimBLEAddress& address);
-      bool backendFindMySound(NimBLEAddress& address, bool gui = false);
+      bool backendFindMySound(NimBLEAddress& address, bool gui = false, bool testOnly = false);
       bool sendAirtagSoundCommand(NimBLEClient* currentClient);
       bool sendFmnaSoundCommand(NimBLEClient* currentClient);
       bool sendDultSoundCommand(NimBLEClient* currentClient);
       bool enableTrackerResponses(NimBLERemoteCharacteristic* characteristic);
-      void createNimbleClient();
+      bool createNimbleClient();
       void initializeFindMyScan();
     #endif
 
@@ -783,7 +805,7 @@ class WiFiScan
     bool isHostAlive(IPAddress ip);
     bool checkHostPort(IPAddress ip, uint16_t port, uint16_t timeout = 100);
     String extractManufacturer(const uint8_t* payload, size_t payload_len);
-    int checkMatchAP(char addr[], bool update_ap = true);
+    int checkMatchAP(char addr[], bool update_ap = true, int rssi = -128, uint8_t channel = 0);
     uint8_t getSecurityType(const uint8_t* beacon, uint16_t len);
     void addAnalyzerValue(int16_t value, int rssi_avg, int16_t target_array[], int array_size);
     bool mac_cmp(struct mac_addr addr1, struct mac_addr addr2);
@@ -862,7 +884,30 @@ class WiFiScan
     void displayAPStats();
 
 
+    marauder::fox::Target fox_target;
+    portMUX_TYPE fox_mux = portMUX_INITIALIZER_UNLOCKED;
+    bool fox_explicit_next = false;
+    uint32_t fox_last_hop = 0;
+    size_t fox_hop_cursor = 0;
+    void prepareFoxTarget(bool bluetooth);
+    marauder::GpsTrackerStats gps_tracker_stats;
+    uint8_t gps_tracker_page = 0;
+    bool gps_tracker_pending_segment = false;
+    marauder::GpsTrackerView gpsTrackerView();
+    void drawGpsTrackerDashboard();
+    geofences::Config wardrive_geofences[geofences::kMax];
+    geofences::Gate wardrive_gate;
+    std::atomic<bool> geofence_paused{false};
+    bool geofence_config_valid = false;
+    uint32_t last_geofence_check = 0;
+    void updateGeofenceState(bool force = false);
+    void drawGeofenceBadge();
+    String pending_wifi_ssid;
+    String pending_wifi_password;
+
   public:
+    bool retainAccessPoint(AccessPoint& ap);
+    bool retainStation(const Station& station);
     bool validDeauthChannel(int channel) const;
     volatile bool bt_cb_busy = false;
     volatile bool bt_pending_clear = false;
@@ -968,6 +1013,7 @@ class WiFiScan
 
     IPAddress current_scan_ip;
 
+
     uint16_t current_scan_port = 1;
 
     String dst_mac = "ff:ff:ff:ff:ff:ff";
@@ -1057,11 +1103,14 @@ class WiFiScan
       void copyNimbleMac(const BLEAddress &addr, unsigned char out[6]);
     #endif
     #ifdef HAS_NIMBLE_2
-      bool executeFindMySound(bool gui = false);
+      bool executeFindMySound(bool gui = false, bool testOnly = false);
+      const marauder::tracker::Report& trackerReport() const { return tracker_report; }
+      void printTrackerReport();
+      void listTrackerTargets();
     #endif
     bool filterActive();
     bool RunGPSInfo(bool tracker = false, bool display = true, bool poi = false);
-    void logPoint(String lat, String lon, float alt, String datetime, bool poi = false);
+    bool logPoint(String lat, String lon, float alt, String datetime, bool poi = false, bool segment = false);
     void setMac();
     void renderRawStats();
     void renderPacketRate();
@@ -1080,7 +1129,28 @@ class WiFiScan
       void captureBLEAdvertisement(const NimBLEAdvertisedDevice* advertisedDevice);
     #endif
     bool scanning();
-    bool joinWiFi(String ssid, String password, bool gui = true);
+    bool joinWiFi(String ssid, String password, bool gui = true, bool save = true);
+    bool joinSavedWiFi(bool gui = false, int index = -1);
+    unsigned foxCandidateCount(marauder::fox::Kind kind);
+    bool foxCandidate(marauder::fox::Kind kind, unsigned index, marauder::fox::Candidate& out);
+    void selectFoxTarget(const marauder::fox::Candidate& candidate);
+    marauder::fox::Target foxSnapshot();
+    void observeFoxWifi(const uint8_t* mac, int8_t rssi, uint8_t channel);
+    void observeFoxBle(const uint8_t* mac, const uint8_t* data, size_t length, int8_t rssi);
+    bool renderFox(TFT_eSPI& frame, bool fixture = false, bool lost = false);
+    #ifdef HAS_BT
+      void rememberBleForFox(const NimBLEAdvertisedDevice* device, uint8_t flags);
+    #endif
+    void reloadGeofences();
+    void cycleGpsTrackerPage();
+    void setGpsTrackerPage(unsigned page);
+    void printGpsTrackerStats();
+    bool renderGpsTracker(TFT_eSPI& frame, unsigned page, bool fixture = false);
+    bool isGeofencePaused() const { return geofence_paused.load(); }
+    bool hasPendingWiFi() const { return pending_wifi_ssid.length() != 0; }
+    bool savePendingWiFi(int replace);
+    void discardPendingWiFi() { pending_wifi_ssid = ""; pending_wifi_password = ""; }
+
     void getMAC(bool get_sta, uint8_t* mac);
     void changeChannel(int chan = -1);
     void RunAPInfo(uint16_t index, bool do_display = true);

@@ -72,7 +72,7 @@ struct AccessPoint {
   bool has_msg_3;
   bool has_msg_4;
   PmfStatus pmf_status = PMF_STATUS_UNKNOWN;
-  uint32_t last_seen_ms;
+  uint32_t last_seen_ms = 0;
 };
 
 struct PortalCredential {

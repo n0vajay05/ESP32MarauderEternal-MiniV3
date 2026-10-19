@@ -1,4 +1,7 @@
 #include "CommandLine.h"
+#include "FirmwareChecks.h"
+#include "DroneRemoteID.h"
+#include "BLEDeviceDetectors.h"
 
 #include <errno.h>
 #include <limits.h>
@@ -539,7 +542,9 @@ void CommandLine::runCommand(String input) {
   if(wifi_scan_obj.scanning() && wifi_scan_obj.currentScanMode == WIFI_SCAN_GPS_NMEA){
     if(input != STOPSCAN_CMD && !storage_protocol_command) return;
   }
-  Serial.println("#" + input);
+  if (input.startsWith("join ") || input.startsWith("settings "))
+    Serial.println(F("#credential command [arguments redacted]"));
+  else Serial.println("#" + input);
 
   LinkedList<String> cmd_args = this->parseCommand(input, " ");
 
@@ -553,7 +558,206 @@ void CommandLine::runCommand(String input) {
   
   //// Admin commands
   // Help
-  if (cmd_args.get(0) == HELP_CMD) {
+  if (cmd_args.get(0) == "selftest") {
+    if (wifi_scan_obj.currentScanMode != WIFI_SCAN_OFF) {
+      Serial.println(F("Stop the active mode before running isolated checks")); return;
+    }
+    if (cmd_args.size() >= 2 && cmd_args.get(1) == "wifi")
+      runWiFiChecks(cmd_args.size() >= 3 ? cmd_args.get(2) : "");
+    else if (cmd_args.size() >= 2 && cmd_args.get(1) == "geofence")
+      runGeofenceChecks(cmd_args.size() >= 3 ? cmd_args.get(2) : "");
+    else if (cmd_args.size() >= 2 && cmd_args.get(1) == "remoteid") DroneRemoteID::runChecks();
+    else if (cmd_args.size() >= 2 && cmd_args.get(1) == "ibeacon") BLEDeviceDetectors::runIBeaconChecks();
+    else if (cmd_args.size() >= 2 && cmd_args.get(1) == "findmy") runTrackerChecks();
+    else if (cmd_args.size() >= 2 && cmd_args.get(1) == "gpstracker") runGpsTrackerChecks();
+    else if (cmd_args.size() >= 2 && cmd_args.get(1) == "fox") {
+      runFoxChecks();
+      #ifdef HAS_SCREEN
+        if (!menu_function_obj.verifyFoxMenus()) Serial.println(F("SELFTEST fox FAIL"));
+      #endif
+    }
+    else Serial.println(F("Usage: selftest wifi|geofence [seed|check], or selftest remoteid|ibeacon"));
+    return;
+  }
+  else if (cmd_args.get(0) == "fox") {
+    using namespace marauder::fox;
+    const auto parseKind = [](const String& name, Kind& kind) {
+      const char* names[] = {"ap","station","pine","multi","ble","findmy","flipper","ibeacon","meta","flock"};
+      for (unsigned i = 0; i < 10; ++i) if (name == names[i]) { kind = static_cast<Kind>(i); return true; }
+      return false;
+    };
+    if (cmd_args.size() == 3 && cmd_args.get(1) == "menu") {
+      if (cmd_args.get(2) != "wifi" && cmd_args.get(2) != "ble") { Serial.println(F("Use wifi or ble")); return; }
+      menu_function_obj.showFoxMenu(cmd_args.get(2) == "ble");
+    } else if (cmd_args.size() == 2 && cmd_args.get(1) == "close") {
+      wifi_scan_obj.StartScan(WIFI_SCAN_OFF); menu_function_obj.closeFoxMenu();
+    } else if (cmd_args.size() == 6 && cmd_args.get(1) == "filter") {
+      const bool bluetooth = cmd_args.get(2) == "ble";
+      if (!bluetooth && cmd_args.get(2) != "wifi") { Serial.println(F("Use wifi or ble")); return; }
+      const String band = cmd_args.get(3), age = cmd_args.get(4), sorting = cmd_args.get(5);
+      if ((band != "any" && band != "24" && band != "5") || (age != "all" && age != "recent") ||
+          (sorting != "signal" && sorting != "name" && sorting != "channel") ||
+          (bluetooth && (band != "any" || sorting == "channel"))) { Serial.println(F("Invalid Fox filter combination")); return; }
+      menu_function_obj.configureFoxFilters(bluetooth, band == "24" ? Band::GHz24 : band == "5" ? Band::GHz5 : Band::Any,
+          age == "recent", sorting == "name" ? Sort::Name : sorting == "channel" ? Sort::Channel : Sort::Signal);
+      Serial.println(F("Fox filters configured"));
+    } else if (cmd_args.size() == 2 && cmd_args.get(1) == "status") {
+      const auto target = wifi_scan_obj.foxSnapshot();
+      Serial.printf("Fox status: active=%u live=%u hits=%lu rssi=%d channel=%u\n", target.active,
+          target.fresh(millis()), static_cast<unsigned long>(target.hits), target.value.rssi, target.value.channel);
+    } else if (cmd_args.size() >= 3) {
+      if (cmd_args.get(1) == "start") {
+        // Discovery lists contain Strings owned by scanner callbacks. Stop the
+        // producer before copying a target or switching directly between hunts.
+        if (wifi_scan_obj.currentScanMode != WIFI_SCAN_OFF && wifi_scan_obj.currentScanMode != WIFI_CONNECTED)
+          wifi_scan_obj.StartScan(WIFI_SCAN_OFF);
+      } else if (wifi_scan_obj.currentScanMode != WIFI_SCAN_OFF && wifi_scan_obj.currentScanMode != WIFI_CONNECTED) {
+        Serial.println(F("Stop the active scan before browsing Fox targets")); return;
+      }
+      Kind kind;
+      if (!parseKind(cmd_args.get(2), kind)) { Serial.println(F("Unknown Fox target category")); return; }
+      if (cmd_args.get(1) == "targets" && cmd_args.size() == 3) menu_function_obj.showFoxTargets(kind);
+      else if (cmd_args.get(1) == "list" && cmd_args.size() == 3) {
+        const auto options = menu_function_obj.foxFilters(static_cast<unsigned>(kind) >= static_cast<unsigned>(Kind::Ble));
+        unsigned matched = 0;
+        for (unsigned i = 0; i < wifi_scan_obj.foxCandidateCount(kind); ++i) {
+          Candidate candidate;
+          if (!wifi_scan_obj.foxCandidate(kind, i, candidate) || !matches(candidate, options, millis())) continue;
+          ++matched;
+          Serial.printf("FOX %u ch=%u rssi=%d age=%lu %s\n", i, candidate.channel, candidate.rssi,
+              static_cast<unsigned long>(candidate.lastSeen ? millis() - candidate.lastSeen : UINT32_MAX), candidate.name);
+        }
+        Serial.printf("Fox list: matched=%u\n", matched);
+      } else if (cmd_args.get(1) == "start" && cmd_args.size() == 4) {
+        int index = -1; Candidate candidate;
+        if (!integerValue(cmd_args.get(3), index, "index") || index < 0 || !wifi_scan_obj.foxCandidate(kind, index, candidate)) {
+          Serial.println(F("Invalid Fox target index")); return;
+        }
+        wifi_scan_obj.selectFoxTarget(candidate);
+        wifi_scan_obj.StartScan(candidate.bluetooth ? BT_SCAN_FOX_HUNT : WIFI_SCAN_SIG_STREN, TFT_CYAN);
+        Serial.println(F("Fox hunt started"));
+      } else Serial.println(F("Invalid Fox command"));
+    } else Serial.println(F("fox menu wifi|ble; filter wifi|ble any|24|5 all|recent signal|name|channel; targets/list <category>; start <category> <index>; status; close"));
+    return;
+  }
+  else if (cmd_args.get(0) == "gpsstats") {
+    if (cmd_args.size() == 3 && cmd_args.get(1) == "page") {
+      int page = -1; if (!integerValue(cmd_args.get(2), page, "page") || page < 0 || page > 1) return;
+      wifi_scan_obj.setGpsTrackerPage(page);
+    }
+    wifi_scan_obj.printGpsTrackerStats(); return;
+  }
+  else if (cmd_args.get(0) == "ibeacon") {
+    if (cmd_args.size() == 1 || cmd_args.get(1) == "list") BLEDeviceDetectors::printIBeacons();
+    else if (cmd_args.get(1) == "show") {
+      #ifdef HAS_SCREEN
+        menu_function_obj.showIBeaconMenu();
+      #endif
+    } else if (cmd_args.size() == 3 && cmd_args.get(1) == "scan") {
+      int seconds = 0;
+      if (!integerValue(cmd_args.get(2), seconds, "seconds") || seconds < 1 || seconds > 3600) {
+        Serial.println(F("iBeacon duration must be 1-3600 seconds")); return;
+      }
+      wifi_scan_obj.resetStandaloneWiFiState();
+      BLEDeviceDetectors::run(BLEDeviceDetectors::DetectorType::IBeacon, static_cast<uint32_t>(seconds) * 1000);
+      wifi_scan_obj.resetStandaloneWiFiState();
+      #ifdef HAS_SCREEN
+        menu_function_obj.changeMenu(menu_function_obj.current_menu, true);
+      #endif
+      Serial.println(F("iBeacon scan complete"));
+    } else Serial.println(F("ibeacon list|show|scan <1-3600 seconds>"));
+    return;
+  }
+  else if (cmd_args.get(0) == "remoteid") {
+    if (cmd_args.size() == 2 && cmd_args.get(1) == "list") DroneRemoteID::printRetained();
+    else if (cmd_args.size() == 2 && cmd_args.get(1) == "export") DroneRemoteID::exportRetained();
+    else if (cmd_args.size() == 3 && cmd_args.get(1) == "scan") {
+      int seconds = 0;
+      if (!integerValue(cmd_args.get(2), seconds, "seconds") || seconds < 1 || seconds > 3600) {
+        Serial.println(F("Remote ID duration must be 1-3600 seconds")); return;
+      }
+      wifi_scan_obj.resetStandaloneWiFiState();
+      DroneRemoteID::run(static_cast<uint32_t>(seconds) * 1000);
+      wifi_scan_obj.resetStandaloneWiFiState();
+      #ifdef HAS_SCREEN
+        menu_function_obj.changeMenu(menu_function_obj.current_menu, true);
+      #endif
+      Serial.println(F("Remote ID scan complete"));
+    } else Serial.println(F("remoteid list|export|scan <1-3600 seconds>"));
+    return;
+  }
+  else if (cmd_args.get(0) == "geofence") {
+    if (cmd_args.size() == 2 && cmd_args.get(1) == "show") {
+      #ifdef HAS_SCREEN
+        menu_function_obj.showGeofenceMenu();
+      #endif
+    } else if (cmd_args.size() == 2 && cmd_args.get(1) == "list") {
+      for (unsigned i = 0; i < geofences::kMax; ++i) {
+        geofences::Config fence;
+        if (settings_obj.loadGeofence(i, fence))
+          Serial.printf("%u: %s %.6f %.6f %.1f mi\n", i + 1, fence.name, fence.latitude, fence.longitude, fence.radiusMiles);
+      }
+      Serial.println(F("Geofence list complete"));
+    } else if (cmd_args.size() == 3 && cmd_args.get(1) == "clear") {
+      int slot = -1;
+      if (!integerValue(cmd_args.get(2), slot, "slot") || slot < 1 || slot > 5) { Serial.println(F("Slot must be 1-5")); return; }
+      if (settings_obj.clearGeofence(slot - 1)) { wifi_scan_obj.reloadGeofences(); Serial.println(F("Geofence cleared")); }
+      else Serial.println(F("Geofence clear failed"));
+    } else if (cmd_args.size() == 7 && cmd_args.get(1) == "set") {
+      int slot = -1;
+      if (!integerValue(cmd_args.get(2), slot, "slot") || slot < 1 || slot > 5) { Serial.println(F("Slot must be 1-5")); return; }
+      geofences::Config fence; fence.enabled = true;
+      const auto number = [](const String& text, double& value) {
+        char* end = nullptr; value = strtod(text.c_str(), &end);
+        return text.length() && end != text.c_str() && *end == 0 && isfinite(value);
+      };
+      double radius = 0;
+      String name = cmd_args.get(6); name.trim();
+      if (!number(cmd_args.get(3), fence.latitude) || !number(cmd_args.get(4), fence.longitude) ||
+          !number(cmd_args.get(5), radius) || !name.length() || name.length() > 32) {
+        Serial.println(F("Invalid geofence values")); return;
+      }
+      strcpy(fence.name, name.c_str()); fence.radiusMiles = radius;
+      if (settings_obj.saveGeofence(slot - 1, fence)) { wifi_scan_obj.reloadGeofences(); Serial.println(F("Geofence saved")); }
+      else Serial.println(F("Invalid geofence or storage error"));
+    } else Serial.println(F("geofence list|show|set <1-5> <lat> <lon> <0.1-1.0 miles> \"<name>\"|clear <1-5>"));
+    return;
+  }
+  else if (cmd_args.get(0) == "wifiprofiles") {
+    if (cmd_args.size() == 1 || cmd_args.get(1) == "list") {
+      const unsigned count = settings_obj.getSavedWifiCount();
+      Serial.printf("Saved WiFi profiles: %u/5\n", count);
+      for (unsigned i = 0; i < count; ++i) {
+        String ssid, password;
+        if (settings_obj.loadSavedWifiCredential(i, ssid, password))
+          Serial.printf("%u: %s [%s]\n", i, ssid.c_str(), password.length() ? "secured" : "open");
+      }
+    } else if (cmd_args.get(1) == "show") {
+      #ifdef HAS_SCREEN
+        menu_function_obj.showSavedWifiMenu(wifi_scan_obj.hasPendingWiFi());
+      #endif
+    } else if (cmd_args.get(1) == "cancel") {
+      wifi_scan_obj.discardPendingWiFi();
+      Serial.println(F("Pending credential discarded"));
+    } else if (cmd_args.size() == 3) {
+      int index = -1;
+      if (!integerValue(cmd_args.get(2), index, "profile index") || index < 0) return;
+      bool ok = false;
+      if (cmd_args.get(1) == "join") ok = wifi_scan_obj.joinSavedWiFi(false, index);
+      else if (cmd_args.get(1) == "forget") ok = settings_obj.removeSavedWifiCredential(index);
+      else if (cmd_args.get(1) == "replace") ok = wifi_scan_obj.savePendingWiFi(index);
+      Serial.println(ok ? F("Profile action succeeded") : F("Profile action failed"));
+    } else Serial.println(F("Usage: wifiprofiles [list|show|join N|forget N|replace N|cancel]"));
+    return;
+  }
+  else if (cmd_args.get(0) == HELP_CMD) {
+    Serial.println(F("geofence list|show|set <1-5> <lat> <lon> <0.1-1.0 miles> \"<name>\"|clear <1-5>"));
+    Serial.println(F("wifiprofiles [list|show|join N|forget N|replace N|cancel]"));
+    Serial.println(F("selftest wifi|geofence [seed|check], or selftest remoteid|ibeacon"));
+    Serial.println(F("remoteid list|export|scan <1-3600 seconds>"));
+    Serial.println(F("ibeacon list|show|scan <1-3600 seconds>"));
+    Serial.println(F("gpsstats [page 0|1]; selftest gpstracker|fox"));
+    Serial.println(F("fox menu wifi|ble; fox list/targets <category>; fox start <category> <index>; fox status; fox close"));
     Serial.println(HELP_HEAD);
     Serial.println(HELP_CH_CMD);
     Serial.println(HELP_SETTINGS_CMD);
@@ -652,8 +856,28 @@ void CommandLine::runCommand(String input) {
       TFT_eSprite frame(&display_obj.tft);
       frame.setColorDepth(16);
 
-      if (!frame.createSprite(TFT_WIDTH, TFT_HEIGHT) ||
-          !menu_function_obj.renderCurrentMenu(frame)) {
+      bool rendered = false;
+      if (frame.createSprite(TFT_WIDTH, TFT_HEIGHT)) {
+        if (cmd_args.size() >= 2 && cmd_args.get(1) == "findmy") {
+          menu_function_obj.showFindMyResult(cmd_args.size() >= 3 && cmd_args.get(2) == "--test");
+          rendered = menu_function_obj.renderCurrentMenu(frame);
+        } else if (cmd_args.size() >= 2 && cmd_args.get(1) == "fox") {
+          menu_function_obj.renderCurrentMenu(frame);
+          const bool fixture = cmd_args.size() >= 3 && (cmd_args.get(2) == "--test" || cmd_args.get(2) == "--lost");
+          rendered = wifi_scan_obj.renderFox(frame, fixture, cmd_args.size() >= 3 && cmd_args.get(2) == "--lost");
+        } else if (cmd_args.size() >= 2 && cmd_args.get(1) == "gpstracker") {
+          int page = 0; if (cmd_args.size() >= 3 && !integerValue(cmd_args.get(2), page, "page")) return;
+          menu_function_obj.renderCurrentMenu(frame);
+          rendered = wifi_scan_obj.renderGpsTracker(frame, page, cmd_args.size() >= 4 && cmd_args.get(3) == "--test");
+        } else if (cmd_args.size() >= 2 && cmd_args.get(1) == "ibeacon") {
+          rendered = BLEDeviceDetectors::renderIBeaconPreview(frame);
+        } else if (cmd_args.size() >= 2 && cmd_args.get(1) == "remoteid") {
+          int page = 5;
+          if (cmd_args.size() >= 3 && !integerValue(cmd_args.get(2), page, "page")) return;
+          if (page >= 0 && page <= 5) rendered = DroneRemoteID::renderPreview(frame, page);
+        } else rendered = menu_function_obj.renderCurrentMenu(frame);
+      }
+      if (!rendered) {
         Serial.println(F("Screenshot unavailable: framebuffer allocation failed"));
         return;
       }
@@ -715,7 +939,6 @@ void CommandLine::runCommand(String input) {
       if (gps_obj.getGpsModuleStatus()) {
         Serial.print(F("Getting GPS Data. Stop with "));
         Serial.println((String)STOPSCAN_CMD);
-        wifi_scan_obj.currentScanMode = WIFI_SCAN_GPS_DATA;
         #ifdef HAS_SCREEN
           menu_function_obj.changeMenu(&menu_function_obj.gpsInfoMenu);
         #endif
@@ -725,7 +948,7 @@ void CommandLine::runCommand(String input) {
   }
   else if (cmd_args.get(0) == GPS_CMD) {
     #ifdef HAS_GPS
-      if (gps_obj.getGpsModuleStatus()) {
+      if (gps_obj.getGpsModuleStatus() || this->argSearch(&cmd_args, "-t") != -1) {
         int get_arg = this->argSearch(&cmd_args, "-g");
         int track_arg = this->argSearch(&cmd_args, "-t");
         int nmea_arg = this->argSearch(&cmd_args, "-n");
@@ -788,7 +1011,6 @@ void CommandLine::runCommand(String input) {
           }
         }
         else if (track_arg != -1) {
-          wifi_scan_obj.currentScanMode = GPS_TRACKER;
           #ifdef HAS_SCREEN
             menu_function_obj.changeMenu(&menu_function_obj.gpsInfoMenu);
           #endif
@@ -805,7 +1027,6 @@ void CommandLine::runCommand(String input) {
         #ifdef HAS_SCREEN
           menu_function_obj.changeMenu(&menu_function_obj.gpsInfoMenu);
         #endif
-        wifi_scan_obj.currentScanMode = WIFI_SCAN_GPS_NMEA;
         wifi_scan_obj.StartScan(WIFI_SCAN_GPS_NMEA, TFT_CYAN);
       }
     #endif
@@ -1479,7 +1700,7 @@ void CommandLine::runCommand(String input) {
 
         Serial.println("Connecting to " + ssid);
 
-        if (!wifi_scan_obj.joinWiFi(ssid, pw, false)) {
+        if (!wifi_scan_obj.joinSavedWiFi(false)) {
           Serial.println("Failed to connected to " + ssid);
           return;
         }
@@ -2139,28 +2360,22 @@ void CommandLine::runCommand(String input) {
     }
     else if (cmd_args.get(0) == BT_FINDMY_CMD) {
       #ifdef HAS_NIMBLE_2
-      int index_sw = this->argSearch(&cmd_args, "-t");
-
-      if (index_sw != -1) {
-        String target_value;
-        if (!this->argumentValue(&cmd_args, index_sw, "-t", target_value))
-          return;
-        int targ_index = -1;
-        if (!this->integerValue(target_value, targ_index, "AirTag index"))
-          return;
-        if (this->inRange(airtags->size(), targ_index)) {
-          for (int x = 0; x < airtags->size(); x++) {
-            AirTag new_atx = airtags->get(x);
-            if (x != targ_index)
-              new_atx.selected = false;
-            else
-              new_atx.selected = true;
-            airtags->set(x, new_atx);
-          }
-
-          wifi_scan_obj.executeFindMySound(false);
-        }
+      if (this->argSearch(&cmd_args,"--status")>=0) { wifi_scan_obj.printTrackerReport(); return; }
+      if (wifi_scan_obj.currentScanMode != WIFI_SCAN_OFF && wifi_scan_obj.currentScanMode != WIFI_CONNECTED) {
+        Serial.println(F("Stop the active mode before FindMy diagnostics")); return;
       }
+      if (this->argSearch(&cmd_args,"--list")>=0) { wifi_scan_obj.listTrackerTargets(); return; }
+      #ifdef HAS_SCREEN
+        if (this->argSearch(&cmd_args,"--show")>=0) { menu_function_obj.showFindMyMenu(); return; }
+        if (this->argSearch(&cmd_args,"--scan")>=0) { menu_function_obj.startFindMySniff(); return; }
+        if (this->argSearch(&cmd_args,"--result")>=0) { menu_function_obj.showFindMyResult(); return; }
+      #endif
+      int index_sw=this->argSearch(&cmd_args,"-t");
+      if (index_sw<0) { Serial.println(F("findmy --list|--status|--show|--scan|--result; findmy -t <index> [--test]")); return; }
+      String value; int target=-1;
+      if (!argumentValue(&cmd_args,index_sw,"-t",value) || !integerValue(value,target,"FindMy index") || !inRange(airtags->size(),target)) return;
+      for (int i=0;i<airtags->size();++i) { auto item=airtags->get(i); item.selected=i==target; airtags->set(i,item); }
+      wifi_scan_obj.executeFindMySound(false,this->argSearch(&cmd_args,"--test")>=0);
       #endif
     }
     else if (cmd_args.get(0) == BT_SPAM_CMD) {
@@ -2292,7 +2507,7 @@ void CommandLine::runCommand(String input) {
       this->startScanFromCLI(WIFI_PING_SCAN, TFT_GREEN, "Ping Scan");
     }
 
-    #ifndef HAS_DUAL_BAND
+    #if !defined(HAS_DUAL_BAND) || defined(MARAUDER_MINI_V3)
       if (cmd_args.get(0) == ARP_SCAN_CMD) {
         this->startScanFromCLI(WIFI_ARP_SCAN, TFT_CYAN, "ARP Scan");
       }
@@ -2544,18 +2759,10 @@ void CommandLine::runCommand(String input) {
       #endif
     }
     else if (s_sw != -1) {
-      String ssid = settings_obj.loadSetting<String>("ClientSSID");
-      String pw = settings_obj.loadSetting<String>("ClientPW");
-
-      if ((ssid != "") && (pw != "")) {
-        wifi_scan_obj.joinWiFi(ssid, pw, false);
-        #ifdef HAS_SCREEN
-          menu_function_obj.changeMenu(menu_function_obj.current_menu);
-        #endif
-      }
-      else {
-        Serial.println(F("There are no saved WiFi credentials"));
-      }
+      wifi_scan_obj.joinSavedWiFi(false);
+      #ifdef HAS_SCREEN
+        menu_function_obj.changeMenu(menu_function_obj.current_menu);
+      #endif
     }
     else {
       Serial.println(F("You did not provide the proper args"));
@@ -2848,7 +3055,7 @@ void CommandLine::runCommand(String input) {
       ap.channel = channel;
       memcpy(ap.bssid, mac, 6);
       ap.selected = true;
-      ap.stations = new LinkedList<uint16_t>();
+      ap.stations = nullptr;
       ap.beacon[0] = 0;
       ap.beacon[1] = 0;
       ap.rssi = -127;
@@ -2862,7 +3069,10 @@ void CommandLine::runCommand(String input) {
       ap.has_msg_4 = false;
       ap.last_seen_ms = millis();
 
-      access_points->add(ap);
+      if (!wifi_scan_obj.retainAccessPoint(ap)) {
+        Serial.println(F("AP list full or internal memory limited"));
+        return;
+      }
 
       Serial.print(F("Added AP ["));
       Serial.print(access_points->size() - 1);
@@ -2930,12 +3140,14 @@ void CommandLine::runCommand(String input) {
       sta.packets = 0;
       sta.ap = ap_index;
 
-      stations->add(sta);
+      if (!wifi_scan_obj.retainStation(sta)) {
+        Serial.println(F("Station list full or internal memory limited"));
+        return;
+      }
 
       // Link station to AP
       AccessPoint ap = access_points->get(ap_index);
       ap.selected = true;
-      ap.stations->add(stations->size() - 1);
       access_points->set(ap_index, ap);
 
       Serial.print(F("Added station ["));

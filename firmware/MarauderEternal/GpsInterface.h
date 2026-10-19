@@ -46,6 +46,7 @@ class GpsInterface {
     bool getGpsModuleStatus();
     uint32_t getBaudRate();
     uint32_t getLastSentenceAgeMs();
+    uint32_t getLastFixTimestampMs() const { return last_fix_sentence_ms; }
     String getLat();
     String getLon();
     int32_t getLatInt();

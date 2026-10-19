@@ -198,6 +198,7 @@ void Display::RunSetup() {
 
   // Need to declare new
   display_buffer = new LinkedList<String>();
+  display_queue_mutex = xSemaphoreCreateMutexStatic(&display_queue_mutex_storage);
 
   #ifdef SCREEN_BUFFER
     screen_buffer = new LinkedList<String>();
@@ -586,63 +587,71 @@ void Display::processAndPrintString(TFT_eSPI& tft, const String& originalString)
   tft.print(line);
 }
 
-void Display::displayBuffer(bool do_clear)
-{
-  if (this->display_buffer->size() > 0)
-  {
+bool Display::queueLine(const String& line) {
+  // Wi-Fi/BLE callbacks never wait for rendering or another producer.
+  if (display_queue_mutex == nullptr ||
+      xSemaphoreTake(display_queue_mutex, 0) != pdTRUE)
+    return false;
+  const bool accepted = display_buffer != nullptr &&
+      display_queue_pressure.allow(display_buffer->size()) &&
+      marauder::memoryGuardedAdd(display_buffer, line, line.length() + 32);
+  xSemaphoreGive(display_queue_mutex);
+  return accepted;
+}
 
-    int print_count = 2;
+bool Display::takeQueuedLine(String& line) {
+  if (display_queue_mutex == nullptr ||
+      xSemaphoreTake(display_queue_mutex, portMAX_DELAY) != pdTRUE)
+    return false;
+  const bool available = display_buffer != nullptr && display_buffer->size() > 0;
+  if (available) line = display_buffer->shift();
+  xSemaphoreGive(display_queue_mutex);
+  return available;
+}
 
-    while ((display_buffer->size() > 0) && (print_count > 0))
-    {
-      // Freeze adding to display buffer
-      if (display_buffer->size() > DISPLAY_BUFFER_LIMIT)
-        this->printing = true;
+void Display::clearQueuedLines() {
+  if (display_queue_mutex == nullptr ||
+      xSemaphoreTake(display_queue_mutex, portMAX_DELAY) != pdTRUE)
+    return;
+  if (display_buffer != nullptr) display_buffer->clear();
+  display_queue_pressure.allow(0);
+  xSemaphoreGive(display_queue_mutex);
+}
 
-      /*#ifndef SCREEN_BUFFER
-        xPos = 0;
-        if ((display_buffer->size() > 0) && (!loading))
-        {
-          //printing = true;
-          delay(print_delay_1);
-          yDraw = scroll_line(TFT_RED);
-          tft.setCursor(xPos, yDraw);
-          tft.setTextColor(TFT_GREEN, TFT_BLACK);
-          tft.print(display_buffer->shift());
-          //printing = false;
-          delay(print_delay_2);
-        }
-        if (!tteBar)
-          blank[(18+(yStart - TOP_FIXED_AREA) / TEXT_HEIGHT)%19] = xPos;
-        else
-          blank[(18+(yStart - TOP_FIXED_AREA_2) / TEXT_HEIGHT)%19] = xPos;
-      #else*/
-        xPos = 0;
-        if (this->screen_buffer->size() >= MAX_SCREEN_BUFFER)
-          this->scrollScreenBuffer();
+int Display::queuedLineCount() {
+  if (display_queue_mutex == nullptr) return 0;
+  if (xSemaphoreTake(display_queue_mutex, 0) != pdTRUE)
+    return DISPLAY_BUFFER_LIMIT;
+  const int count = display_buffer != nullptr ? display_buffer->size() : 0;
+  xSemaphoreGive(display_queue_mutex);
+  return count;
+}
 
-        screen_buffer->add(display_buffer->shift());
+void Display::displayBuffer(bool do_clear) {
+  for (int print_count = 0; print_count < 2; ++print_count) {
+    String line;
+    if (!this->takeQueuedLine(line)) break;
+    // Release the queue mutex before any TFT work. The display history is
+    // owned by the main loop; callbacks only touch the protected input queue.
+    xPos = 0;
+    if (this->screen_buffer->size() >= MAX_SCREEN_BUFFER)
+      this->scrollScreenBuffer();
+    marauder::memoryGuardedAdd(screen_buffer, line, line.length() + 32);
 
-        for (int i = 0; i < this->screen_buffer->size(); i++) {
-		  #ifdef MARAUDER_PANCAKE
-			tft.setCursor(xPos, (i * TEXT_HEIGHT) + TOP_FIXED_AREA_2);
-		  #else
-			#ifdef HAS_TOUCH
-			  tft.setCursor(xPos, (i * 12) + ((TFT_HEIGHT / 6) * 1.3));
-			#else
-			  tft.setCursor(xPos, (i * 12) + (TFT_HEIGHT / 6));
-			#endif
-		  #endif
-
-          this->processAndPrintString(tft, this->screen_buffer->get(i));
-        }
-      //#endif
-
-      print_count--;
+    for (int i = 0; i < this->screen_buffer->size(); i++) {
+#ifdef MARAUDER_PANCAKE
+      tft.setCursor(xPos, (i * TEXT_HEIGHT) + TOP_FIXED_AREA_2);
+#else
+#ifdef HAS_TOUCH
+      tft.setCursor(xPos, (i * 12) + ((TFT_HEIGHT / 6) * 1.3));
+#else
+      tft.setCursor(xPos, (i * 12) + (TFT_HEIGHT / 6));
+#endif
+#endif
+      this->processAndPrintString(tft, this->screen_buffer->get(i));
     }
-
-    this->printing = false;
   }
+  this->printing = false;
 }
 
 void Display::showCenterText(const char* text, int y, bool small_pp, uint8_t text_size)

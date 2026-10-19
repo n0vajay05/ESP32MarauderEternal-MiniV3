@@ -26,6 +26,8 @@ class Buffer {
                  const char* directory = "/gps");
     void append(wifi_promiscuous_pkt_t* packet, int len);
     void append(String log);
+    bool appendRecord(const String& log);
+    bool isLogging() const { return writing; }
     void save();
     void flush();
     String getFileName();

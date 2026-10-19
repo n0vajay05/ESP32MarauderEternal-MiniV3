@@ -13,6 +13,8 @@
  */
 
 #include "DroneRemoteID.h"
+#include "DroneTracking.h"
+#include "DroneExport.h"
 
 #include "configs.h"
 
@@ -27,6 +29,13 @@
 
 #include "Display.h"
 #include "Switches.h"
+#include "GpsInterface.h"
+#include "StoragePaths.h"
+#include <SD.h>
+#include <memory>
+#include "SPIFFS.h"
+
+extern GpsInterface gps_obj;
 
 extern Display display_obj;
 extern Switches u_btn;
@@ -41,8 +50,6 @@ namespace {
 constexpr uint8_t MAX_RESULTS = 16;
 constexpr uint8_t VISIBLE_ROWS = 6;
 constexpr uint8_t ODID_MESSAGE_SIZE = 25;
-constexpr uint8_t ODID_ID_SIZE = 20;
-constexpr uint8_t ODID_DESCRIPTION_SIZE = 23;
 constexpr uint16_t CHANNEL_DWELL_MS = 350;
 constexpr int16_t HEADER_HEIGHT = 16;
 constexpr int16_t ROW_START_Y = 29;
@@ -64,34 +71,18 @@ enum Method : uint8_t {
   METHOD_BLE = 2
 };
 
-struct Drone {
-  char address[18];
-  char id[ODID_ID_SIZE + 1];
-  char operatorId[ODID_ID_SIZE + 1];
-  char description[ODID_DESCRIPTION_SIZE + 1];
-  double latitude;
-  double longitude;
-  double operatorLatitude;
-  double operatorLongitude;
-  float altitude;
-  float height;
-  float speed;
-  float direction;
-  float operatorAltitude;
-  uint32_t lastSeen;
-  int8_t rssi;
-  uint8_t channel;
-  uint8_t uaType;
-  uint8_t idType;
-  uint8_t status;
-  uint8_t messagesSeen;
-  uint8_t methods;
-  uint8_t rawMessageMask;
-  uint8_t rawMessages[CAPTURED_MESSAGE_TYPES][CAPTURED_MESSAGE_SIZE];
-};
-
+using Drone = drone_tracking::Record;
 Drone results[MAX_RESULTS]{};
-uint8_t resultCount = 0;
+// Foreground-only snapshot: do not put the enlarged 16-record store on the
+// Arduino loop stack, and do not allocate/free it at each screen refresh.
+Drone uiSnapshot[MAX_RESULTS]{};
+unsigned resultCount = 0;
+uint32_t nextGeneration = 0;
+drone_tracking::Export exportLog;
+String lastExportBase;
+bool lastExportOk = false;
+Drone previewRecord;
+bool previewValid = false;
 volatile uint32_t resultRevision = 0;
 volatile uint8_t scanChannel = 1;
 portMUX_TYPE resultMux = portMUX_INITIALIZER_UNLOCKED;
@@ -122,7 +113,7 @@ void releaseControls() {
 
 void resetResults() {
   portENTER_CRITICAL(&resultMux);
-  memset(results, 0, sizeof(results));
+  for (auto& result : results) result = Drone();
   resultCount = 0;
   resultRevision++;
   portEXIT_CRITICAL(&resultMux);
@@ -134,70 +125,9 @@ void formatAddress(const uint8_t* address, char* output, size_t outputSize) {
            address[5]);
 }
 
-void copyPrintable(char* destination, size_t destinationSize,
-                   const uint8_t* source, size_t sourceSize) {
-  memset(destination, 0, destinationSize);
-  const size_t copied = min(sourceSize, destinationSize - 1);
-  for (size_t index = 0; index < copied; index++) {
-    if (source[index] == 0)
-      break;
-    if (source[index] < 32 || source[index] > 126)
-      break;
-    destination[index] = static_cast<char>(source[index]);
-  }
-}
-
-int32_t readLeInt32(const uint8_t* value) {
-  return static_cast<int32_t>(
-      static_cast<uint32_t>(value[0]) |
-      (static_cast<uint32_t>(value[1]) << 8) |
-      (static_cast<uint32_t>(value[2]) << 16) |
-      (static_cast<uint32_t>(value[3]) << 24));
-}
-
 uint16_t readLeUint16(const uint8_t* value) {
   return static_cast<uint16_t>(value[0]) |
          (static_cast<uint16_t>(value[1]) << 8);
-}
-
-float decodeAltitude(uint16_t encoded) {
-  return encoded == 0xFFFF ? INVALID_ALTITUDE :
-      static_cast<float>(encoded) * 0.5f - 1000.0f;
-}
-
-Drone* findOrCreateLocked(const char* address, int8_t rssi,
-                          uint8_t channel, Method method) {
-  uint8_t index = resultCount;
-  for (uint8_t current = 0; current < resultCount; current++) {
-    if (strncmp(results[current].address, address,
-                sizeof(results[current].address)) == 0) {
-      index = current;
-      break;
-    }
-  }
-  if (index == resultCount && resultCount < MAX_RESULTS) {
-    resultCount++;
-    Drone& created = results[index];
-    memset(&created, 0, sizeof(created));
-    strlcpy(created.address, address, sizeof(created.address));
-    snprintf(created.id, sizeof(created.id), "RID-%c%c%c%c",
-             address[12], address[13], address[15], address[16]);
-    created.altitude = INVALID_ALTITUDE;
-    created.height = INVALID_ALTITUDE;
-    created.operatorAltitude = INVALID_ALTITUDE;
-    created.speed = 255.0f;
-    created.direction = 361.0f;
-  }
-  if (index >= MAX_RESULTS)
-    return nullptr;
-
-  Drone& drone = results[index];
-  drone.rssi = rssi;
-  if (channel != 0)
-    drone.channel = channel;
-  drone.lastSeen = millis();
-  drone.methods |= method;
-  return &drone;
 }
 
 void decodeMessage(const char* address, int8_t rssi, uint8_t channel,
@@ -205,93 +135,25 @@ void decodeMessage(const char* address, int8_t rssi, uint8_t channel,
 
 void decodePacked(const char* address, int8_t rssi, uint8_t channel,
                   Method method, const uint8_t* message, size_t length) {
-  if (length < 3 || message[1] != ODID_MESSAGE_SIZE)
-    return;
-  const uint8_t available = (length - 3) / ODID_MESSAGE_SIZE;
-  const uint8_t count = min(message[2], available);
-  for (uint8_t index = 0; index < count; index++) {
-    decodeMessage(address, rssi, channel, method,
-                  message + 3 + index * ODID_MESSAGE_SIZE,
-                  ODID_MESSAGE_SIZE);
-  }
+  if (length < 3 || message[1] != ODID_MESSAGE_SIZE || !message[2] ||
+      message[2] > 9 || 3U + size_t(message[2]) * ODID_MESSAGE_SIZE > length ||
+      (message[0] & 15) > 2) return;
+  // Reject a malformed pack before retaining any of its component messages.
+  for (unsigned i = 0; i < message[2]; ++i)
+    if (!drone_tracking::validMessage(message + 3 + i * 25, 25)) return;
+  for (unsigned i = 0; i < message[2]; ++i)
+    decodeMessage(address, rssi, channel, method, message + 3 + i * 25, 25);
 }
 
 void decodeMessage(const char* address, int8_t rssi, uint8_t channel,
                    Method method, const uint8_t* message, size_t length) {
-  if (!message || length < ODID_MESSAGE_SIZE)
-    return;
-  const uint8_t type = (message[0] >> 4) & 0x0F;
-  if (type == PACKED) {
-    decodePacked(address, rssi, channel, method, message, length);
-    return;
+  if (!message || !length) return;
+  if ((message[0] >> 4) == PACKED) {
+    decodePacked(address, rssi, channel, method, message, length); return;
   }
-  if (type > OPERATOR_ID && type != AUTH)
-    return;
-
   portENTER_CRITICAL(&resultMux);
-  Drone* drone = findOrCreateLocked(address, rssi, channel, method);
-  if (!drone) {
-    portEXIT_CRITICAL(&resultMux);
-    return;
-  }
-
-  if (type < CAPTURED_MESSAGE_TYPES) {
-    memcpy(drone->rawMessages[type], message, CAPTURED_MESSAGE_SIZE);
-    drone->rawMessageMask |= 1 << type;
-  }
-
-  switch (type) {
-    case BASIC_ID:
-      drone->idType = (message[1] >> 4) & 0x0F;
-      drone->uaType = message[1] & 0x0F;
-      copyPrintable(drone->id, sizeof(drone->id), message + 2,
-                    ODID_ID_SIZE);
-      if (drone->id[0] == '\0')
-        snprintf(drone->id, sizeof(drone->id), "RID-%c%c%c%c",
-                 address[12], address[13], address[15], address[16]);
-      drone->messagesSeen |= 1 << BASIC_ID;
-      break;
-
-    case LOCATION: {
-      drone->status = (message[1] >> 4) & 0x0F;
-      const bool speedMultiplier = (message[1] & 0x01) != 0;
-      const bool eastWest = (message[1] & 0x02) != 0;
-      drone->direction = message[2] + (eastWest ? 180.0f : 0.0f);
-      drone->speed = message[3] == 0xFF ? 255.0f :
-          (speedMultiplier ? message[3] * 0.75f + 63.75f :
-                             message[3] * 0.25f);
-      drone->latitude = readLeInt32(message + 5) / 10000000.0;
-      drone->longitude = readLeInt32(message + 9) / 10000000.0;
-      drone->altitude = decodeAltitude(readLeUint16(message + 15));
-      drone->height = decodeAltitude(readLeUint16(message + 17));
-      drone->messagesSeen |= 1 << LOCATION;
-      break;
-    }
-
-    case AUTH:
-      drone->messagesSeen |= 1 << AUTH;
-      break;
-
-    case SELF_ID:
-      copyPrintable(drone->description, sizeof(drone->description),
-                    message + 2, ODID_DESCRIPTION_SIZE);
-      drone->messagesSeen |= 1 << SELF_ID;
-      break;
-
-    case SYSTEM:
-      drone->operatorLatitude = readLeInt32(message + 2) / 10000000.0;
-      drone->operatorLongitude = readLeInt32(message + 6) / 10000000.0;
-      drone->operatorAltitude = decodeAltitude(readLeUint16(message + 18));
-      drone->messagesSeen |= 1 << SYSTEM;
-      break;
-
-    case OPERATOR_ID:
-      copyPrintable(drone->operatorId, sizeof(drone->operatorId),
-                    message + 2, ODID_ID_SIZE);
-      drone->messagesSeen |= 1 << OPERATOR_ID;
-      break;
-  }
-  resultRevision++;
+  if (drone_tracking::observe(results, resultCount, MAX_RESULTS, address, rssi,
+      channel, method, message, length, millis(), nextGeneration)) ++resultRevision;
   portEXIT_CRITICAL(&resultMux);
 }
 
@@ -443,17 +305,20 @@ String methodName(uint8_t methods) {
   return "BLE";
 }
 
-void drawHeader() {
-  display_obj.tft.fillRect(0, 0, TFT_WIDTH, HEADER_HEIGHT, TFT_NAVY);
-  display_obj.tft.setTextDatum(TC_DATUM);
-  display_obj.tft.setTextSize(1);
-  display_obj.tft.setTextColor(TFT_CYAN, TFT_NAVY);
-  display_obj.tft.drawString("DRONE REMOTE ID", TFT_WIDTH / 2, 4, 1);
-  display_obj.tft.setTextDatum(TL_DATUM);
+template <typename Canvas>
+void drawHeaderTo(Canvas& canvas, bool preview = false) {
+  canvas.fillRect(0, 0, TFT_WIDTH, HEADER_HEIGHT, TFT_NAVY);
+  canvas.setTextDatum(TC_DATUM);
+  canvas.setTextSize(1);
+  canvas.setTextColor(TFT_CYAN, TFT_NAVY);
+  canvas.drawString(preview ? "TEST REMOTE ID" : "DRONE REMOTE ID", TFT_WIDTH / 2, 4, 1);
+  canvas.setTextDatum(TL_DATUM);
 }
 
+void drawHeader() { drawHeaderTo(display_obj.tft); }
+
 void drawList(uint8_t selected) {
-  Drone snapshot[MAX_RESULTS]{};
+  Drone* snapshot = uiSnapshot;
   const uint8_t count = copyResults(snapshot);
   display_obj.tft.fillScreen(TFT_BLACK);
   drawHeader();
@@ -475,7 +340,7 @@ void drawList(uint8_t selected) {
     display_obj.tft.setTextColor(foreground, background);
     display_obj.tft.setViewport(2, y, TFT_WIDTH - 4, ROW_HEIGHT - 1);
     display_obj.tft.setCursor(0, 2);
-    display_obj.tft.printf("%d %s", snapshot[index].rssi,
+    display_obj.tft.printf("%c %d %s", snapshot[index].lost ? 'L' : 'A', snapshot[index].rssi,
                            snapshot[index].id);
     display_obj.tft.resetViewport();
   }
@@ -484,75 +349,68 @@ void drawList(uint8_t selected) {
   display_obj.tft.print(F("Center: exit"));
 }
 
-void drawDetail(uint8_t selected, uint8_t page) {
-  Drone snapshot[MAX_RESULTS]{};
-  const uint8_t count = copyResults(snapshot);
-  if (count == 0 || selected >= count) {
-    drawList(0);
-    return;
-  }
-  const Drone& drone = snapshot[selected];
-  display_obj.tft.fillScreen(TFT_BLACK);
-  drawHeader();
-  display_obj.tft.setTextDatum(TL_DATUM);
-  display_obj.tft.setTextSize(1);
+template <typename Canvas>
+void drawDetailTo(Canvas& canvas, const Drone& drone, uint8_t page, bool preview = false) {
+  canvas.fillScreen(TFT_BLACK);
+  drawHeaderTo(canvas, preview);
+  canvas.setTextDatum(TL_DATUM);
+  canvas.setTextSize(1);
 
   if (page == 0) {
-    display_obj.tft.setTextColor(TFT_YELLOW, TFT_BLACK);
-    display_obj.tft.drawString(drone.id, 2, 20, 1);
-    display_obj.tft.setTextColor(TFT_WHITE, TFT_BLACK);
-    display_obj.tft.drawString(drone.address, 2, 34, 1);
-    display_obj.tft.drawString(String("Type: ") + uaTypeName(drone.uaType),
+    canvas.setTextColor(TFT_YELLOW, TFT_BLACK);
+    canvas.drawString(drone.id, 2, 20, 1);
+    canvas.setTextColor(TFT_WHITE, TFT_BLACK);
+    canvas.drawString(drone.address, 2, 34, 1);
+    canvas.drawString(String("Type: ") + uaTypeName(drone.uaType),
                                2, 48, 1);
-    display_obj.tft.drawString(String("State: ") + statusName(drone.status),
+    canvas.drawString(String("State: ") + statusName(drone.status),
                                2, 62, 1);
-    display_obj.tft.drawString(String(drone.rssi) + "dBm " +
+    canvas.drawString(String(drone.rssi) + "dBm " +
                                methodName(drone.methods), 2, 76, 1);
-    display_obj.tft.drawString(String("Seen ") +
+    canvas.drawString(String("Seen ") +
         ((millis() - drone.lastSeen) / 1000) + "s ago", 2, 90, 1);
   }
   else if (page == 1) {
-    display_obj.tft.setTextColor(TFT_YELLOW, TFT_BLACK);
-    display_obj.tft.drawString("Aircraft location", 2, 20, 1);
-    display_obj.tft.setTextColor(TFT_WHITE, TFT_BLACK);
-    if (drone.messagesSeen & (1 << LOCATION)) {
-      display_obj.tft.drawString("Lat: " + String(drone.latitude, 6), 2, 34, 1);
-      display_obj.tft.drawString("Lon: " + String(drone.longitude, 6), 2, 48, 1);
-      display_obj.tft.drawString("Alt: " + String(drone.altitude, 1) + "m",
+    canvas.setTextColor(TFT_YELLOW, TFT_BLACK);
+    canvas.drawString("Aircraft location", 2, 20, 1);
+    canvas.setTextColor(TFT_WHITE, TFT_BLACK);
+    if (drone.locationValid && uint32_t(millis() - drone.locationSeen) < drone_tracking::kLostMs) {
+      canvas.drawString("Lat: " + String(drone.latitude, 6), 2, 34, 1);
+      canvas.drawString("Lon: " + String(drone.longitude, 6), 2, 48, 1);
+      canvas.drawString("Alt: " + (drone.altitude > INVALID_ALTITUDE ? String(drone.altitude, 1) + "m" : "unknown"),
                                  2, 62, 1);
-      display_obj.tft.drawString("Spd: " + String(drone.speed, 1) + "m/s",
+      canvas.drawString("Spd: " + (drone.speed <= 254.25f ? String(drone.speed, 1) + "m/s" : "unknown"),
                                  2, 76, 1);
-      display_obj.tft.drawString("Dir: " + String(drone.direction, 0) + "deg",
+      canvas.drawString("Dir: " + (drone.direction <= 360 ? String(drone.direction, 0) + "deg" : "unknown"),
                                  2, 90, 1);
     }
     else {
-      display_obj.tft.drawString("Not observed", 2, 40, 1);
+      canvas.drawString("No fresh position", 2, 40, 1);
     }
   }
   else if (page == 2) {
-    display_obj.tft.setTextColor(TFT_YELLOW, TFT_BLACK);
-    display_obj.tft.drawString("Operator", 2, 20, 1);
-    display_obj.tft.setTextColor(TFT_WHITE, TFT_BLACK);
-    display_obj.tft.setViewport(2, 34, TFT_WIDTH - 4, 13);
-    display_obj.tft.setCursor(0, 2);
-    display_obj.tft.print(drone.operatorId[0] ? drone.operatorId : "ID not observed");
-    display_obj.tft.resetViewport();
-    if (drone.messagesSeen & (1 << SYSTEM)) {
-      display_obj.tft.drawString("Lat: " + String(drone.operatorLatitude, 6),
+    canvas.setTextColor(TFT_YELLOW, TFT_BLACK);
+    canvas.drawString("Operator", 2, 20, 1);
+    canvas.setTextColor(TFT_WHITE, TFT_BLACK);
+    canvas.setViewport(2, 34, TFT_WIDTH - 4, 13);
+    canvas.setCursor(0, 2);
+    canvas.print(drone.operatorId[0] ? drone.operatorId : "ID not observed");
+    canvas.resetViewport();
+    if (drone.operatorLocationValid && uint32_t(millis() - drone.systemSeen) < drone_tracking::kLostMs) {
+      canvas.drawString("Lat: " + String(drone.operatorLatitude, 6),
                                  2, 50, 1);
-      display_obj.tft.drawString("Lon: " + String(drone.operatorLongitude, 6),
+      canvas.drawString("Lon: " + String(drone.operatorLongitude, 6),
                                  2, 64, 1);
-      display_obj.tft.drawString("Alt: " + String(drone.operatorAltitude, 1) +
-                                 "m", 2, 78, 1);
+      canvas.drawString("Alt: " + (drone.operatorAltitude > INVALID_ALTITUDE ? String(drone.operatorAltitude, 1) + "m" : "unknown"), 2, 78, 1);
     }
     else {
-      display_obj.tft.drawString("Location not observed", 2, 54, 1);
+      canvas.drawString("Location not observed", 2, 54, 1);
     }
   }
-  else {
-    display_obj.tft.setTextColor(TFT_YELLOW, TFT_BLACK);
-    display_obj.tft.drawString("Messages / description", 2, 20, 1);
-    display_obj.tft.setTextColor(TFT_WHITE, TFT_BLACK);
+  else if (page == 3) {
+    canvas.setTextColor(TFT_YELLOW, TFT_BLACK);
+    canvas.drawString("Messages / description", 2, 20, 1);
+    canvas.setTextColor(TFT_WHITE, TFT_BLACK);
     char messageFlags[19]{};
     snprintf(messageFlags, sizeof(messageFlags), "B%c L%c A%c S%c Y%c O%c",
              (drone.messagesSeen & (1 << BASIC_ID)) ? '+' : '-',
@@ -561,18 +419,72 @@ void drawDetail(uint8_t selected, uint8_t page) {
              (drone.messagesSeen & (1 << SELF_ID)) ? '+' : '-',
              (drone.messagesSeen & (1 << SYSTEM)) ? '+' : '-',
              (drone.messagesSeen & (1 << OPERATOR_ID)) ? '+' : '-');
-    display_obj.tft.drawString(messageFlags, 2, 36, 1);
-    display_obj.tft.setTextColor(TFT_CYAN, TFT_BLACK);
-    display_obj.tft.setTextWrap(true);
-    display_obj.tft.setCursor(2, 52);
-    display_obj.tft.print(drone.description[0] ? drone.description :
+    canvas.drawString(messageFlags, 2, 36, 1);
+    canvas.setTextColor(TFT_CYAN, TFT_BLACK);
+    canvas.setTextWrap(true);
+    canvas.setCursor(2, 52);
+    canvas.print(drone.description[0] ? drone.description :
                           "Description not observed");
-    display_obj.tft.setTextWrap(false);
+    canvas.setTextWrap(false);
+    if (drone.messagesSeen & (1 << AUTH)) {
+      canvas.drawString("Auth type:" + String(drone.authenticationType) + " pg:" + String(drone.authenticationPage), 2, 90, 1);
+      canvas.drawString("Pages:" + String(drone.authenticationLastPage + 1) + " len:" + String(drone.authenticationLength), 2, 104, 1);
+    }
   }
 
-  display_obj.tft.setTextColor(TFT_LIGHTGREY, TFT_BLACK);
-  display_obj.tft.setCursor(2, TFT_HEIGHT - 9);
-  display_obj.tft.print(F("L:list R:next C:exit"));
+  else if (page == 4) {
+    canvas.setTextColor(drone.lost ? TFT_RED : TFT_GREEN, TFT_BLACK);
+    canvas.drawString(drone.lost ? "LOST (30s timeout)" : "TRACKING", 2, 20, 1);
+    canvas.setTextColor(TFT_WHITE, TFT_BLACK);
+    canvas.drawString(String(drone.messageRate, 1) + " msg/s #" + String(drone.messageCount), 2, 34, 1);
+    canvas.drawString("Lost:" + String(drone.lostCount) + " Back:" + String(drone.reacquiredCount), 2, 48, 1);
+    if (gps_obj.getFixStatus() && gps_obj.getLastSentenceAgeMs() <= 5000 && drone.locationValid &&
+        uint32_t(millis() - drone.locationSeen) < drone_tracking::kLostMs) {
+      const double lat = gps_obj.getLatInt() / 1e6, lon = gps_obj.getLonInt() / 1e6;
+      canvas.drawString(String(drone_tracking::distanceMeters(lat, lon, drone.latitude, drone.longitude), 0) + "m from receiver", 2, 62, 1);
+      canvas.drawString("Bearing: " + String(drone_tracking::bearingDegrees(lat, lon, drone.latitude, drone.longitude), 0) + "deg", 2, 76, 1);
+    } else canvas.drawString("Range: GPS/fix needed", 2, 68, 1);
+    canvas.drawString("Trail points: " + String(drone.historyCount), 2, 96, 1);
+  } else {
+    canvas.setTextColor(TFT_YELLOW, TFT_BLACK);
+    canvas.drawString("Movement trail", 2, 20, 1);
+    if (!drone.historyCount) canvas.drawString("No positions yet", 2, 40, 1);
+    else {
+      const double lat = drone.history[0].latitudeE7 / 1e7;
+      const double lon = drone.history[0].longitudeE7 / 1e7;
+      double radius = 50;
+      for (unsigned i = 0; i < drone.historyCount; ++i)
+        radius = std::max(radius, drone_tracking::distanceMeters(lat, lon, drone.history[i].latitudeE7 / 1e7, drone.history[i].longitudeE7 / 1e7) * 1.15);
+      const int cx = TFT_WIDTH / 2, cy = 71;
+      canvas.drawRect(3, 33, TFT_WIDTH - 6, 76, TFT_DARKGREY);
+      canvas.drawLine(cx, 33, cx, 108, TFT_DARKGREY);
+      canvas.drawLine(3, cy, TFT_WIDTH - 4, cy, TFT_DARKGREY);
+      int previousX = cx, previousY = cy;
+      for (unsigned i = 0; i < drone.historyCount; ++i) {
+        const double pointLat = drone.history[i].latitudeE7 / 1e7, pointLon = drone.history[i].longitudeE7 / 1e7;
+        const double bearing = drone_tracking::bearingDegrees(lat, lon, pointLat, pointLon) * .017453292519943295;
+        const double ratio = drone_tracking::distanceMeters(lat, lon, pointLat, pointLon) / radius;
+        const int x = cx + int(sin(bearing) * ratio * (TFT_WIDTH / 2 - 7));
+        const int y = cy - int(cos(bearing) * ratio * 34);
+        if (i && uint32_t(drone.history[i].observedMs - drone.history[i - 1].observedMs) < drone_tracking::kLostMs)
+          canvas.drawLine(previousX, previousY, x, y, TFT_CYAN);
+        canvas.fillCircle(x, y, i + 1 == drone.historyCount ? 2 : 1, TFT_YELLOW);
+        previousX = x; previousY = y;
+      }
+      canvas.setTextColor(TFT_LIGHTGREY, TFT_BLACK);
+      canvas.drawString("N up, " + String(radius, 0) + "m radius", 2, 110, 1);
+    }
+  }
+
+  canvas.setTextColor(TFT_LIGHTGREY, TFT_BLACK);
+  canvas.setCursor(2, TFT_HEIGHT - 9);
+  canvas.print(F("L:list R:next C:exit"));
+}
+
+void drawDetail(uint8_t selected, uint8_t page) {
+  const uint8_t count = copyResults(uiSnapshot);
+  if (!count || selected >= count) { drawList(0); return; }
+  drawDetailTo(display_obj.tft, uiSnapshot[selected], page);
 }
 
 void showError(const char* message) {
@@ -592,7 +504,7 @@ void showError(const char* message) {
 
 bool selectCapturedForSpoof(CapturedDrone& target) {
   releaseControls();
-  Drone snapshot[MAX_RESULTS]{};
+  Drone* snapshot = uiSnapshot;
   const uint8_t count = copyResults(snapshot);
   if (count == 0) {
     showError("No captured drones. Run Drone Remote ID first.");
@@ -673,9 +585,23 @@ bool selectCapturedForSpoof(CapturedDrone& target) {
   }
 }
 
-void run() {
-  releaseControls();
+void run(uint32_t durationMs) {
+  if (!durationMs) releaseControls();
   resetResults();
+  lastExportOk = false;
+  lastExportBase = "";
+  #ifdef HAS_SD
+    SD.mkdir(marauder::storage::LOGS_DIR);
+    for (unsigned i = 1; i <= 9999; ++i) {
+      const String base = String(marauder::storage::LOGS_DIR) + "/remoteid_" + String(i);
+      if (!SD.exists(base + ".csv") && !SD.exists(base + ".gpx") && !SD.exists(base + ".part")) {
+        if (exportLog.begin(SD, base)) lastExportBase = base;
+        break;
+      }
+    }
+    if (lastExportBase.length()) Serial.println("Remote ID logging: " + lastExportBase);
+    else Serial.println(F("Remote ID: SD logging unavailable; retaining on-device results"));
+  #endif
 
   if (NimBLEDevice::isInitialized())
     NimBLEDevice::deinit(true);
@@ -716,10 +642,24 @@ void run() {
   uint32_t drawnRevision = UINT32_MAX;
   uint32_t nextRefresh = 0;
   uint32_t nextChannelHop = millis() + CHANNEL_DWELL_MS;
+  const uint32_t startedMs = millis();
+  uint32_t nextLog = startedMs;
+  char selectedId[21] = {}, selectedAddress[18] = {};
 
+  Serial.printf("Remote ID radios: WiFi=%s BLE=%s\n", wifiError == ESP_OK ? "ready" : "failed", bleScanning ? "ready" : "failed");
   while (true) {
-    if (c_btn.justPressed())
-      break;
+    gps_obj.main();
+    const uint32_t now = millis();
+    if (c_btn.justPressed() || (durationMs && uint32_t(now - startedMs) >= durationMs)) break;
+    portENTER_CRITICAL(&resultMux);
+    for (unsigned i = 0; i < resultCount; ++i) drone_tracking::lifecycle(results[i], now);
+    portEXIT_CRITICAL(&resultMux);
+    if (exportLog.active() && static_cast<int32_t>(now - nextLog) >= 0) {
+      nextLog = now + 1000;
+      const uint8_t logCount = copyResults(uiSnapshot);
+      for (unsigned i = 0; i < logCount; ++i)
+        if (!exportLog.sample(uiSnapshot[i], now)) break;
+    }
 
     if (wifiError == ESP_OK &&
         static_cast<int32_t>(millis() - nextChannelHop) >= 0) {
@@ -739,6 +679,19 @@ void run() {
     else if (selected >= count)
       selected = count - 1;
 
+    if (detailView && (selectedId[0] || selectedAddress[0])) {
+      portENTER_CRITICAL(&resultMux);
+      for (unsigned i = 0; i < resultCount; ++i)
+        if ((selectedId[0] && strcmp(results[i].id, selectedId) == 0) ||
+            strcmp(results[i].address, selectedAddress) == 0 ||
+            strcmp(results[i].wifiAddress, selectedAddress) == 0 ||
+            strcmp(results[i].bleAddress, selectedAddress) == 0) { selected = i; break; }
+      if (selected < resultCount) {
+        strlcpy(selectedId, results[selected].id, sizeof(selectedId));
+        strlcpy(selectedAddress, results[selected].address, sizeof(selectedAddress));
+      }
+      portEXIT_CRITICAL(&resultMux);
+    }
     bool redraw = revision != drawnRevision;
     if (!detailView && u_btn.justPressed() && selected > 0) {
       selected--;
@@ -752,14 +705,22 @@ void run() {
       if (!detailView) {
         detailView = true;
         detailPage = 0;
+        portENTER_CRITICAL(&resultMux);
+        strlcpy(selectedId, results[selected].id, sizeof(selectedId));
+        strlcpy(selectedAddress, results[selected].address, sizeof(selectedAddress));
+        for (unsigned i = 0; i < resultCount; ++i) results[i].pinned = i == selected;
+        portEXIT_CRITICAL(&resultMux);
       }
       else {
-        detailPage = (detailPage + 1) % 4;
+        detailPage = (detailPage + 1) % 6;
       }
       redraw = true;
     }
     if (l_btn.justPressed() && detailView) {
       detailView = false;
+      portENTER_CRITICAL(&resultMux);
+      for (unsigned i = 0; i < resultCount; ++i) results[i].pinned = false;
+      portEXIT_CRITICAL(&resultMux);
       redraw = true;
     }
     if (static_cast<int32_t>(millis() - nextRefresh) >= 0) {
@@ -787,10 +748,121 @@ void run() {
   WiFi.disconnect(true);
   WiFi.mode(WIFI_OFF);
   delay(20);
-  releaseControls();
+  if (exportLog.active()) {
+    const uint8_t count = copyResults(uiSnapshot);
+    for (unsigned i = 0; i < count; ++i) exportLog.sample(uiSnapshot[i], millis());
+    lastExportOk = exportLog.finish();
+    Serial.println(lastExportOk ? "Remote ID CSV/GPX saved: " + lastExportBase : "Remote ID export failed; partial files retained: " + lastExportBase);
+  }
+  if (!durationMs) releaseControls();
   display_obj.tft.setTextDatum(TL_DATUM);
   display_obj.tft.setTextWrap(false);
   display_obj.tft.setTextSize(1);
+}
+
+void printRetained() {
+  const uint8_t count = copyResults(uiSnapshot);
+  Serial.printf("Remote ID retained: %u/16\n", count);
+  for (unsigned i = 0; i < count; ++i) {
+    const auto& r = uiSnapshot[i];
+    Serial.printf("%u: %s [%s] %ddBm, %lu messages, lost=%lu back=%lu\n", i,
+        r.id, r.lost ? "lost" : "active", r.rssi, static_cast<unsigned long>(r.messageCount),
+        static_cast<unsigned long>(r.lostCount), static_cast<unsigned long>(r.reacquiredCount));
+  }
+  if (lastExportBase.length()) Serial.println("Remote ID exports: " + lastExportBase + (lastExportOk ? " [complete]" : " [partial]"));
+}
+bool exportRetained() {
+  if (lastExportOk) { Serial.println("Remote ID exports: " + lastExportBase + ".csv and .gpx"); return true; }
+  const uint8_t count = copyResults(uiSnapshot);
+  if (!count) { Serial.println(F("No Remote ID results to export")); return false; }
+  #ifdef HAS_SD
+    SD.mkdir(marauder::storage::LOGS_DIR);
+    for (unsigned i = 1; i <= 9999; ++i) {
+      const String base = String(marauder::storage::LOGS_DIR) + "/remoteid_" + String(i);
+      if (SD.exists(base + ".csv") || SD.exists(base + ".gpx") || SD.exists(base + ".part")) continue;
+      if (!exportLog.begin(SD, base)) return false;
+      lastExportBase = base;
+      bool ok = true;
+      for (unsigned record = 0; record < count && ok; ++record) ok = exportLog.sample(uiSnapshot[record], millis());
+      lastExportOk = exportLog.finish() && ok;
+      Serial.println(lastExportOk ? "Remote ID exports: " + base : "Remote ID export incomplete: " + base);
+      return lastExportOk;
+    }
+  #endif
+  return false;
+}
+bool renderPreview(TFT_eSprite& frame, uint8_t page) {
+  if (!previewValid || page > 5) return false;
+  drawDetailTo(frame, previewRecord, page, true);
+  return true;
+}
+void runChecks() {
+  bool ok = true;
+  const auto check = [&ok](bool passed, const char* label) {
+    Serial.printf("CHECK %s: %s\n", passed ? "PASS" : "FAIL", label);
+    ok &= passed; return passed;
+  };
+  std::unique_ptr<Drone[]> fixture(new (std::nothrow) Drone[3]);
+  std::unique_ptr<drone_tracking::Export> writer(new (std::nothrow) drone_tracking::Export);
+  if (!check(fixture && writer, "Remote ID fixture memory")) { Serial.println(F("SELFTEST remoteid FAIL")); return; }
+  constexpr const char* base = "/ridcheck";
+  const auto cleanup = []() {
+    SPIFFS.remove("/ridcheck.csv"); SPIFFS.remove("/ridcheck.gpx"); SPIFFS.remove("/ridcheck.part");
+    for (unsigned i = 0; i < 16; ++i) SPIFFS.remove(String("/ridcheck.t") + String(i));
+  };
+  cleanup();
+  unsigned count = 0; uint32_t generation = 0;
+  uint8_t basic[25] = {0x02, 0x12}; memcpy(basic + 2, "TEST&\"DRONE", 11);
+  uint8_t location[25] = {0x12, 0x20, 90, 255};
+  const auto put32 = [](uint8_t* p, int32_t n) { for (unsigned i = 0; i < 4; ++i) p[i] = uint32_t(n) >> (i * 8); };
+  put32(location + 5, 400000000); put32(location + 9, -740000000);
+  const auto observe = [&](const char* mac, const uint8_t* message, uint32_t when, uint8_t method = 1) {
+    return drone_tracking::observe(fixture.get(), count, 3, mac, -42, method == 1 ? 6 : 0,
+                                  method, message, 25, when, generation);
+  };
+  Drone* record = observe("02:00:00:00:00:01", basic, 1000);
+  if (!check(record, "synthetic Basic ID decoded")) { cleanup(); Serial.println(F("SELFTEST remoteid FAIL")); return; }
+  check(writer->begin(SPIFFS, base), "export fixture created");
+  if (writer->active()) check(writer->sample(*record, 1000), "CSV identity row");
+  record = observe("02:00:00:00:00:01", location, 2000);
+  check(record && record->locationValid && record->speed == 63.75f && record->altitude == -1000, "valid speed and unknown altitude decoded");
+  if (record && writer->active()) check(writer->sample(*record, 2000), "first GPX point");
+  put32(location + 5, 400001000); location[15] = 0x98; location[16] = 8; // 100 m.
+  record = observe("02:00:00:00:00:01", location, 3000);
+  if (record && writer->active()) check(writer->sample(*record, 3000), "second GPX point");
+  drone_tracking::lifecycle(*record, 34000);
+  check(record->lost && record->lostCount == 1, "lost transition");
+  if (writer->active()) check(writer->sample(*record, 34000), "CSV lost event");
+  record = observe("02:00:00:00:00:02", basic, 35000, 2);
+  check(record && count == 1 && record->methods == 3 && record->reacquiredCount == 1, "cross-radio identity merge and reacquisition");
+  put32(location + 5, 400002000); record = observe("02:00:00:00:00:02", location, 35001, 2);
+  if (record && writer->active()) check(writer->sample(*record, 36000), "GPX segment after reacquisition");
+  check(writer->finish(), "CSV and GPX committed");
+  check(!writer->begin(SPIFFS, base), "existing export never overwritten");
+  if (record) {
+    check(record->rawMessageMask == 3 && !memcmp(record->rawMessages[1], location, 25), "retained raw messages preserved");
+    previewRecord = *record;
+    const uint32_t offset = millis() - previewRecord.lastSeen;
+    previewRecord.firstSeen += offset; previewRecord.lastSeen += offset; previewRecord.locationSeen += offset;
+    for (unsigned i = 0; i < previewRecord.historyCount; ++i) previewRecord.history[i].observedMs += offset;
+    previewValid = true;
+    uint8_t invalid[25] = {0x12}; put32(invalid + 5, 910000000);
+    check(drone_tracking::apply(*record, invalid, 25, 37000) && !record->locationValid, "invalid coordinates excluded");
+  }
+  for (const char* extension : {"csv", "gpx"}) {
+    File file = SPIFFS.open(String(base) + "." + extension, FILE_READ);
+    check(file && file.size() > 0, "export readback");
+    Serial.printf("RID-CHECK-%s-BEGIN\n", extension);
+    uint8_t buffer[128];
+    while (file && file.available()) {
+      const size_t bytes = file.read(buffer, sizeof(buffer));
+      if (!bytes) { check(false, "export readback progress"); break; }
+      Serial.write(buffer, bytes);
+    }
+    file.close(); Serial.printf("RID-CHECK-%s-END\n", extension);
+  }
+  cleanup();
+  Serial.println(ok ? F("SELFTEST remoteid PASS") : F("SELFTEST remoteid FAIL"));
 }
 
 }  // namespace DroneRemoteID
@@ -798,7 +870,11 @@ void run() {
 #else
 
 namespace DroneRemoteID {
-void run() {}
+void run(uint32_t) {}
+void printRetained() {}
+bool exportRetained() { return false; }
+void runChecks() {}
+bool renderPreview(TFT_eSprite&, uint8_t) { return false; }
 bool selectCapturedForSpoof(CapturedDrone&) { return false; }
 }
 
