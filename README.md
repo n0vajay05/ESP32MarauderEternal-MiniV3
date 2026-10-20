@@ -1,4 +1,4 @@
-# ESP32 Marauder Eternal 1.16.2
+# ESP32 Marauder Eternal 1.16.3
 
 <img width="314" height="314" alt="esp32_marauder_eternal_source" src="https://github.com/user-attachments/assets/79332db4-7a71-423f-a99d-937090bb196f" />
 
@@ -19,15 +19,29 @@ Marauder code base by JustCallMeKoKo and modified for the Marauder Mini V3 only.
 ## Release identity
 
 - Product: `ESP32 Marauder Eternal`
-- Version: `v1.16.2`
-- Desktop flasher: `1.5.0`, including firmware `1.16.2`
-- Release notes: [1.16.2](release/RELEASE_NOTES_1.16.2.md)
+- Version: `v1.16.3`
+- Desktop flasher: `1.5.0`, including firmware `1.16.3`
+- Release notes: [1.16.3](release/RELEASE_NOTES_1.16.3.md)
 - Arduino ESP32 core used for the verified build: `3.3.4`
 - Board target: `esp32:esp32:esp32c5`
 - Options: `FlashSize=8M,PartitionScheme=custom,PSRAM=enabled`
 
 The source contains a compile-time guard that rejects non-ESP32-C5 board
 targets. `MARAUDER_MINI_V3` is also fixed by the project configuration.
+
+## 1.16.3 update
+
+Firmware 1.16.3 adds **Device > Update Firmware > Update Over WiFi** with
+network scanning, manual SSID/password entry, editable network settings, and
+GitHub release checks and installation. It saves the last successful update
+network, shows connection status above the update actions, and provides
+**Forget Network**. Leaving Update Firmware disconnects WiFi. See
+[WiFi firmware updates](#wifi-firmware-updates) for the complete workflow.
+
+The Mini V3 now initializes its SD card before the display uses their shared
+SPI bus and retries a failed mount once at a slower speed. USB mirroring and
+arrow/C controls remain available. See the
+[1.16.3 release notes](release/RELEASE_NOTES_1.16.3.md) for validation details.
 
 ## 1.16.2 update
 
@@ -284,7 +298,7 @@ For a blank board, or when the bootloader and partition table must also be
 restored, use this one firmware payload:
 
 ```text
-release/Marauder_Eternal_1.16.2_MiniV3_ESP32-C5.bin
+release/Marauder_Eternal_1.16.3_MiniV3_ESP32-C5.bin
 ```
 
 It is an 8 MB merged image containing the ESP32-C5 bootloader, partition
