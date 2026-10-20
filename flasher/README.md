@@ -1,9 +1,81 @@
 # Marauder Eternal Flasher
 
-Flasher 1.5.0 is a one-click desktop flasher for the Marauder Mini V3 with an
-ESP32-C5 and 8 MB flash. Packaged applications include the verified Marauder
-Eternal 1.16.3 full-device image and also allow the user to choose another
+Flasher 1.7.0 is a one-click desktop flasher for the Marauder Mini V3 with an
+ESP32-C5 and 8 MB flash. Standard packages include the verified Marauder
+Eternal 1.16.4 full-device image and also allow the user to choose another
 `.bin`.
+
+## Download updates
+
+The launcher checks the
+[Eternal Mini V3 releases](https://github.com/n0vajay05/ESP32MarauderEternal-MiniV3/releases)
+when it opens. **Check Online For Update**, next to **Choose BIN** and **Use
+Included**, runs the same check manually. Both checks look for firmware and
+flasher releases independently, including flasher-only releases. The check reads
+the 100 most recent release entries and ignores drafts and prereleases.
+It compares numeric firmware versions
+against the newer of the included and selected firmware. A newer release shows
+**Newest MarauderEternal version (version number) found, do you want to
+download?** Otherwise it shows **Up To Date**. If the server cannot be reached,
+it shows **Failed to connect to update server, please try again later.**
+
+Accept the download and choose where to save its BIN. The app downloads the
+application image, verifies its size, SHA-256, device identity, version, and
+partition layout, then selects it. Click **Connect & Flash** separately when
+ready. Application images preserve saved settings when flashed to a compatible
+Mini. Failed or cancelled downloads leave the previous selection and any
+existing destination file intact.
+
+If the included BIN or manifest is missing, or the selected BIN becomes
+unavailable or invalid, the launcher can still open. The button says **Download
+Firmware** and fetches the latest stable release even if its version matches
+the launcher's release. Flashing is disabled until a valid BIN is selected;
+mirroring and SD Files remain available. Choosing a valid BIN or completing a
+download restores **Check Online For Update**. Startup checks wait until active
+USB operations finish, and network work runs in a background thread.
+
+A newer flasher for the current platform shows **Newest MarauderEternal Flasher
+version (version number) found, do you want to download and restart?** Accepting
+downloads the matching Linux or Windows x86-64 application, verifies its size,
+SHA-256, executable architecture, version, and startup health, then replaces and
+restarts the launcher. A separate helper waits for the launcher to exit before
+replacement, including Windows EXE locks. The old executable is retained with
+a `.previous` suffix; a replacement/launch failure preserves or restores it.
+The selected external firmware file is passed to the new launcher. If both
+updates are available, the flasher is offered first and firmware is checked
+again after restart. Declining the flasher still allows the firmware update.
+
+Portable packages update at their existing location, which must be writable.
+When run from Python source, choose where to save the new standalone launcher;
+the source checkout is preserved. Unsupported desktop architectures continue
+to support firmware downloads without offering an incompatible flasher.
+
+## Publish desktop updates
+
+Builds generate a versioned native executable plus `flasher-linux-x86_64.json`
+or `flasher-windows-x86_64.json` and platform checksums. Upload these generated
+files as GitHub **release assets** so installed launchers can find them. Actions
+build artifacts alone are not downloadable by the public updater.
+
+The desktop build workflow builds both native packages. Publishing a release
+runs it and attaches the platform update assets automatically. To populate an
+existing draft release before publication, run **Build desktop flashers** with
+its `release_tag` input; leaving the input blank creates build artifacts only.
+The selected workflow ref supplies the source for a manually dispatched build.
+For immutable releases, upload assets while the release is still a draft, then
+publish it. No release is created or published by the build workflow.
+
+For a new desktop-only release without a firmware manifest, the Linux job also
+attaches the current checked-in firmware bundle. Existing firmware assets are
+preserved when a release already has a manifest. This keeps the Mini's WiFi OTA
+checker compatible with GitHub's latest release while flasher versions advance
+independently.
+
+Update `flasher_version` through `scripts/package_release.py` and the matching
+launcher fallback/workflow version when releasing desktop changes. Firmware
+and flasher versions remain independent. Keep update protocol 1 and the
+`--update-health`, `--apply-flasher-update`, and `--firmware` handoff interfaces
+compatible in later self-updating packages.
 
 ## Use the application
 

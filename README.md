@@ -1,4 +1,4 @@
-# ESP32 Marauder Eternal 1.16.3
+# ESP32 Marauder Eternal 1.16.4
 
 <img width="314" height="314" alt="esp32_marauder_eternal_source" src="https://github.com/user-attachments/assets/79332db4-7a71-423f-a99d-937090bb196f" />
 
@@ -19,15 +19,39 @@ Marauder code base by JustCallMeKoKo and modified for the Marauder Mini V3 only.
 ## Release identity
 
 - Product: `ESP32 Marauder Eternal`
-- Version: `v1.16.3`
-- Desktop flasher: `1.5.0`, including firmware `1.16.3`
-- Release notes: [1.16.3](release/RELEASE_NOTES_1.16.3.md)
+- Version: `v1.16.4`
+- Desktop flasher: `1.7.0`, including firmware `1.16.4`
+- Release notes: [1.16.4](release/RELEASE_NOTES_1.16.4.md)
 - Arduino ESP32 core used for the verified build: `3.3.4`
 - Board target: `esp32:esp32:esp32c5`
 - Options: `FlashSize=8M,PartitionScheme=custom,PSRAM=enabled`
 
 The source contains a compile-time guard that rejects non-ESP32-C5 board
 targets. `MARAUDER_MINI_V3` is also fixed by the project configuration.
+
+## 1.16.4 update
+
+This release bundles firmware 1.16.4 with Flasher 1.7.0 and adds desktop
+firmware downloads and flasher self-updates.
+
+Flasher 1.7.0 checks this repository for firmware and flasher updates at launch
+and through **Check Online For Update**, next to **Choose BIN** and **Use
+Included**. It offers newer firmware
+for download, verifies the application image, and selects it for flashing.
+If no usable BIN is available, the launcher stays open and the button becomes
+**Download Firmware** to fetch the latest release. Downloading does not flash
+the Mini.
+
+When a newer flasher is available for Linux or Windows x86-64, the launcher
+offers to download, verify, replace itself, and restart. It retains the previous
+executable and preserves a selected firmware file. If both updates are
+available, it offers the flasher first and checks firmware again after restart.
+Flasher-only releases are supported. See
+[publishing desktop updates](flasher/README.md#publish-desktop-updates) for the
+release assets required by the updater.
+
+See the [1.16.4 release notes](release/RELEASE_NOTES_1.16.4.md) for package
+and validation details.
 
 ## 1.16.3 update
 
@@ -298,7 +322,7 @@ For a blank board, or when the bootloader and partition table must also be
 restored, use this one firmware payload:
 
 ```text
-release/Marauder_Eternal_1.16.3_MiniV3_ESP32-C5.bin
+release/Marauder_Eternal_1.16.4_MiniV3_ESP32-C5.bin
 ```
 
 It is an 8 MB merged image containing the ESP32-C5 bootloader, partition

@@ -1,15 +1,23 @@
-name: Build desktop flashers 1.5.0
+name: Build desktop flashers 1.7.0
 
 env:
-  FIRMWARE_VERSION: "1.16.3"
-  FLASHER_VERSION: "1.5.0"
+  FIRMWARE_VERSION: "1.16.4"
+  FLASHER_VERSION: "1.7.0"
 
 on:
   workflow_dispatch:
+    inputs:
+      release_tag:
+        description: "Existing release tag to attach packages to (blank builds artifacts only)"
+        required: false
+        type: string
+  release:
+    types: [published]
   push:
     paths:
       - "flasher/**"
       - "scripts/build-gui-*"
+      - "scripts/package_flasher.py"
       - "release/*.bin"
       - "release/manifest.json"
       - "VERSION"
@@ -17,6 +25,8 @@ on:
 
 jobs:
   build:
+    permissions:
+      contents: write
     strategy:
       fail-fast: false
       matrix:
@@ -54,27 +64,48 @@ jobs:
       - name: Bundled self-test
         shell: bash
         run: ./dist/${{ matrix.platform }}/${{ matrix.executable }} --self-test
-      - name: Create package checksum
+      - name: Create update package and checksums
+        shell: bash
+        run: python scripts/package_flasher.py dist/${{ matrix.platform }}/${{ matrix.executable }} --platform ${{ matrix.platform }}-x86_64
+      - name: Preserve device OTA compatibility for desktop-only releases
+        if: matrix.platform == 'linux' && (github.event_name == 'release' || (github.event_name == 'workflow_dispatch' && inputs.release_tag != ''))
         shell: bash
         env:
-          PACKAGE_DIR: dist/${{ matrix.platform }}
-          PACKAGE_EXECUTABLE: ${{ matrix.executable }}
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.event.release.tag_name || inputs.release_tag }}
         run: |
-          python - <<'PY'
-          import hashlib
-          import os
-          from pathlib import Path
-
-          package = Path(os.environ["PACKAGE_DIR"]) / os.environ["PACKAGE_EXECUTABLE"]
-          digest = hashlib.sha256(package.read_bytes()).hexdigest()
-          package.with_name("SHA256SUMS").write_text(
-              f"{digest}  {package.name}\n", encoding="ascii"
-          )
-          PY
+          has_manifest="$(gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --json assets --jq '[.assets[] | select(.name == "manifest.json")] | length')"
+          if [[ "$has_manifest" == "0" ]]; then
+            app_count="$(gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --json assets --jq '[.assets[] | select(.name | endswith(".app.bin"))] | length')"
+            if [[ "$app_count" != "0" ]]; then
+              echo "::error::Release contains a firmware application without its manifest; attach the matching manifest before publishing desktop updates."
+              exit 1
+            fi
+            gh release upload "$RELEASE_TAG" release/manifest.json \
+              release/"Marauder_Eternal_${FIRMWARE_VERSION}_MiniV3_ESP32-C5"*.bin \
+              release/SHA256SUMS --repo "$GITHUB_REPOSITORY" --clobber
+          fi
+      - name: Attach native update assets to release
+        if: github.event_name == 'release' || (github.event_name == 'workflow_dispatch' && inputs.release_tag != '')
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.event.release.tag_name || inputs.release_tag }}
+          PACKAGE_PLATFORM: ${{ matrix.platform }}-x86_64
+        run: |
+          extension=""
+          if [[ "$PACKAGE_PLATFORM" == windows-* ]]; then extension=".exe"; fi
+          gh release upload "$RELEASE_TAG" \
+            "dist/${{ matrix.platform }}/MarauderEternalFlasher-${FLASHER_VERSION}-${PACKAGE_PLATFORM}${extension}" \
+            "dist/${{ matrix.platform }}/flasher-${PACKAGE_PLATFORM}.json" \
+            "dist/${{ matrix.platform }}/flasher-${PACKAGE_PLATFORM}.sha256" \
+            --repo "$GITHUB_REPOSITORY" --clobber
       - uses: actions/upload-artifact@v4
         with:
           name: MarauderEternalFlasher-${{ env.FLASHER_VERSION }}-${{ matrix.platform }}
           path: |
             dist/${{ matrix.platform }}/${{ matrix.executable }}
             dist/${{ matrix.platform }}/SHA256SUMS
+            dist/${{ matrix.platform }}/MarauderEternalFlasher-*-${{ matrix.platform }}-x86_64*
+            dist/${{ matrix.platform }}/flasher-${{ matrix.platform }}-x86_64.*
           if-no-files-found: error

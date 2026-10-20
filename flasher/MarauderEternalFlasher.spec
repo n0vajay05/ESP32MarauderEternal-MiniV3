@@ -9,18 +9,21 @@ from PyInstaller.utils.hooks import collect_data_files, collect_submodules
 
 project_root = Path(SPECPATH).resolve().parent
 manifest = project_root / "release" / "manifest.json"
-release = json.loads(manifest.read_text(encoding="utf-8"))
-firmware = project_root / "release" / release["full_device_image"]["file"]
+try:
+    release = json.loads(manifest.read_text(encoding="utf-8"))
+    filename = release["full_device_image"]["file"]
+    firmware = project_root / "release" / filename if Path(filename).name == filename else None
+except (OSError, ValueError, KeyError, TypeError):
+    firmware = None
 notices = project_root / "flasher" / "THIRD_PARTY_NOTICES.md"
 
-if not firmware.is_file():
-    raise SystemExit(f"Firmware is missing: {firmware}")
-
 datas = [
-    (str(firmware), "firmware"),
-    (str(manifest), "firmware"),
     (str(notices), "."),
 ]
+if firmware is not None and firmware.is_file():
+    datas.append((str(firmware), "firmware"))
+if manifest.is_file():
+    datas.append((str(manifest), "firmware"))
 datas += collect_data_files("esptool")
 
 if sys.platform == "win32":

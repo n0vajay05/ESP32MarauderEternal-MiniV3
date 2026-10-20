@@ -10,6 +10,7 @@ import os
 import queue
 import re
 import secrets
+import shutil
 import struct
 import sys
 import tempfile
@@ -26,6 +27,11 @@ from tkinter import filedialog, font as tkfont, messagebox, ttk
 if not __package__ and not getattr(sys, "frozen", False):
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from flasher.screen_mirror import HEIGHT as MIRROR_HEIGHT, WIDTH as MIRROR_WIDTH, KEY_BUTTONS, MirrorKeyboard, MirrorSerialClient
+from flasher.online_update import (
+    SERVER_ERROR, OnlineFirmware, OnlineFlasher, OnlineUpdateError, OnlineUpdater,
+    UpdateCancelled, UpdateConnectionError, UpdateCheck, version_tuple, current_platform,
+)
+from flasher.self_update import create_stage, prepare_handoff, verify_flasher, helper_main, cleanup_completed
 
 try:
     import serial
@@ -48,9 +54,23 @@ def release_manifest_path() -> Path:
 def load_release_manifest() -> dict[str, object]:
     path = release_manifest_path()
     try:
-        return json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError, TypeError) as error:
-        raise RuntimeError(f"Release manifest is missing or invalid: {path}") from error
+        manifest = json.loads(path.read_text(encoding="utf-8"))
+        version_tuple(manifest['version'])
+        version_tuple(manifest['flasher_version'])
+        image = manifest['full_device_image']
+        if (Path(image['file']).name != image['file'] or
+                not re.fullmatch(r'[0-9a-f]{64}', image['sha256'])):
+            raise ValueError('Invalid included image record')
+        return manifest
+    except (OSError, ValueError, TypeError, KeyError):
+        # A source-only launcher or a damaged bundle can still fetch firmware.
+        return {
+            'version': '1.16.4', 'flasher_version': '1.7.0',
+            'full_device_image': {
+                'file': 'Marauder_Eternal_1.16.4_MiniV3_ESP32-C5.bin',
+                'sha256': '',
+            },
+        }
 
 
 RELEASE_MANIFEST = load_release_manifest()
@@ -273,6 +293,12 @@ def validate_firmware_identity(path: Path) -> FirmwareIdentity:
             "The selected image uses an incompatible Mini V3 partition layout."
         )
     return identity
+
+
+def validate_online_firmware(path: Path, version: str) -> None:
+    image = inspect_firmware(path)
+    if image.offset != APPLICATION_OFFSET or version_tuple(read_firmware_identity(path).version) != version_tuple(version):
+        raise OnlineUpdateError("Downloaded firmware identity does not match the offered version.")
 
 
 def validate_partition_table(prefix: bytes) -> None:
@@ -981,13 +1007,19 @@ class FlasherApp:
     ERROR = "#ef6461"
     BRIGHT_ERROR = "#ff2b2b"
 
-    def __init__(self, root: tk.Tk) -> None:
+    def __init__(self, root: tk.Tk, *, check_updates: bool = True) -> None:
         self.root = root
         self.events: queue.Queue[tuple[str, object]] = queue.Queue()
         self.ports: list[PortEntry] = []
         self.port_by_label: dict[str, PortEntry] = {}
         self.flashing = False
         self.sd_busy = False
+        self.online_busy = False
+        self.online_cancel = threading.Event()
+        self.quit_after_online = False
+        self.startup_update_pending = check_updates
+        self.closed = False
+        self.pending_updates: UpdateCheck | None = None
         self.mirror_window: tk.Toplevel | None = None
         self.mirror_stop = threading.Event()
         self.mirror_frames: queue.Queue[bytes] = queue.Queue(maxsize=1)
@@ -1007,11 +1039,16 @@ class FlasherApp:
         self.sd_entry_by_item: dict[str, SdFileEntry] = {}
         self.raw_output: list[str] = []
         self.highest_progress = 0.0
-        self.firmware = inspect_firmware(resource_path(), included=True)
+        try:
+            self.firmware: FirmwareImage | None = inspect_firmware(resource_path(), included=True)
+        except (OSError, ValueError):
+            self.firmware = None
+        self.included_available = self.firmware is not None
+        self.firmware_stamp = None
 
         self.port_var = tk.StringVar()
-        self.firmware_path_var = tk.StringVar(value=f"Included Marauder Eternal {FIRMWARE_VERSION}")
-        self.firmware_detail_var = tk.StringVar(value=self.firmware.detail)
+        self.firmware_path_var = tk.StringVar(value=f"Included Marauder Eternal {FIRMWARE_VERSION}" if self.firmware else "No firmware selected")
+        self.firmware_detail_var = tk.StringVar(value=self.firmware.detail if self.firmware else "Download firmware or choose a BIN file")
         self.firmware_warning_var = tk.StringVar()
         self.status_var = tk.StringVar(value="Connect a Marauder Mini V3 to begin")
         self.percent_var = tk.StringVar(value="0%")
@@ -1029,6 +1066,8 @@ class FlasherApp:
         self.refresh_ports()
         self.root.after(100, self._drain_events)
         self.root.after(1800, self._automatic_refresh)
+        if check_updates:
+            self.root.after(500, self._startup_online_check)
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
 
     def _configure_window(self) -> None:
@@ -1196,8 +1235,10 @@ class FlasherApp:
             font=("TkDefaultFont", 10),
         )
         self.firmware_entry.pack(side="left", fill="x", expand=True, ipady=8)
+        firmware_actions = ttk.Frame(panel, style="Panel.TFrame")
+        firmware_actions.pack(fill="x", pady=(0, 8))
         self.browse_button = tk.Button(
-            firmware_row,
+            firmware_actions,
             text="Choose BIN",
             command=self.choose_firmware,
             background=self.PANEL_ALT,
@@ -1209,9 +1250,9 @@ class FlasherApp:
             pady=8,
             cursor="hand2",
         )
-        self.browse_button.pack(side="left", padx=(9, 0))
+        self.browse_button.pack(side="left")
         self.included_button = tk.Button(
-            firmware_row,
+            firmware_actions,
             text="Use Included",
             command=self.use_included_firmware,
             background=self.PANEL_ALT,
@@ -1224,6 +1265,16 @@ class FlasherApp:
             cursor="hand2",
         )
         self.included_button.pack(side="left", padx=(7, 0))
+        self.online_button = tk.Button(
+            firmware_actions,
+            text="Check Online For Update",
+            command=self.check_online_for_update,
+            background=self.PANEL_ALT, foreground=self.TEXT,
+            activebackground="#2a3744", activeforeground=self.TEXT,
+            disabledforeground="#7c8491", relief="flat",
+            padx=12, pady=8, cursor="hand2",
+        )
+        self.online_button.pack(side="left", padx=(7, 0))
         self._label(
             panel,
             textvariable=self.firmware_detail_var,
@@ -1353,7 +1404,9 @@ class FlasherApp:
         return max(0, (self.log.winfo_height() - log_padding) // line_height)
 
     def _update_firmware_warning(self) -> None:
-        if not self.firmware.identity_verified:
+        if self.firmware is None:
+            message = "Download firmware or choose a BIN file before flashing."
+        elif not self.firmware.identity_verified:
             message = (
                 "WARNING: Device identity was not verified. Flash only if you independently "
                 "confirmed this image and its partition layout."
@@ -1366,20 +1419,22 @@ class FlasherApp:
 
     def _select_firmware(self, firmware: FirmwareImage, display_path: str) -> None:
         self.firmware = firmware
+        self.firmware_stamp = None
         self.firmware_path_var.set(display_path)
         self.firmware_detail_var.set(firmware.detail)
         self._update_firmware_warning()
+        self._refresh_firmware_availability()
         self.raw_output.clear()
         if self.ports:
             self.status_var.set("Ready to connect and flash")
 
     def choose_firmware(self) -> None:
-        if self.flashing or self.sd_busy or self._mirror_open():
+        if self.flashing or self.sd_busy or self.online_busy or self._mirror_open():
             return
         selected = filedialog.askopenfilename(
             parent=self.root,
             title="Choose firmware BIN",
-            initialdir=str(self.firmware.path.parent),
+            initialdir=str(self.firmware.path.parent if self.firmware else Path.home()),
             filetypes=(("Firmware BIN files", "*.bin"), ("All files", "*.*")),
         )
         if not selected:
@@ -1406,7 +1461,7 @@ class FlasherApp:
         self._select_firmware(firmware, str(firmware.path))
 
     def use_included_firmware(self) -> None:
-        if self.flashing or self.sd_busy or self._mirror_open():
+        if self.flashing or self.sd_busy or self.online_busy or self._mirror_open():
             return
         try:
             firmware = inspect_firmware(resource_path(), included=True)
@@ -1415,11 +1470,268 @@ class FlasherApp:
             return
         self._select_firmware(firmware, f"Included Marauder Eternal {FIRMWARE_VERSION}")
 
+    def _online_blocked(self) -> bool:
+        return bool(self.flashing or self.sd_busy or self.online_busy or
+                    self._mirror_open() or self.sd_window is not None)
+
+    def _startup_online_check(self) -> None:
+        if not self.startup_update_pending:
+            return
+        if self._online_blocked():
+            self.root.after(1000, self._startup_online_check)
+            return
+        self.check_online_for_update()
+
+    def _refresh_firmware_availability(self) -> None:
+        if self.firmware is not None:
+            try:
+                stat = self.firmware.path.stat()
+                stamp = (stat.st_size, stat.st_mtime_ns)
+                if stamp != self.firmware_stamp:
+                    if stat.st_size != self.firmware.size or sha256_file(self.firmware.path) != self.firmware.sha256:
+                        raise ValueError('Selected firmware changed')
+                    self.firmware_stamp = stamp
+            except (OSError, ValueError):
+                self.firmware = None
+                self.firmware_path_var.set("No firmware selected")
+                self.firmware_detail_var.set("Download firmware or choose a BIN file")
+                self._update_firmware_warning()
+        self.online_button.configure(text="Check Online For Update" if self.firmware else "Download Firmware")
+        try:
+            included_exists = resource_path().is_file()
+        except OSError:
+            included_exists = False
+        if not included_exists:
+            self.included_available = False
+        self.included_button.configure(state="normal" if self.included_available and not self._online_blocked() else "disabled")
+
+    def _current_update_version(self) -> str | None:
+        if self.firmware is None:
+            return None
+        current = FIRMWARE_VERSION
+        if self.firmware.identity_verified:
+            try:
+                selected = read_firmware_identity(self.firmware.path).version
+                if version_tuple(selected) > version_tuple(current):
+                    current = selected
+            except (OSError, ValueError):
+                pass
+        return current
+
+    def check_online_for_update(self) -> None:
+        if self._online_blocked():
+            return
+        self._refresh_firmware_availability()
+        self.startup_update_pending = False
+        self.online_busy = True
+        self.online_cancel.clear()
+        self._set_main_controls_locked(True)
+        self.status_var.set("Checking online for firmware and flasher updates…")
+        self.status_label.configure(foreground=self.MUTED)
+        self._append_log("Checking the Eternal Mini V3 release repository…")
+        current = self._current_update_version()
+        threading.Thread(target=self._online_check_worker, args=(current,), daemon=True).start()
+
+    def _online_check_worker(self, current: str | None) -> None:
+        try:
+            updater = OnlineUpdater(APP_VERSION, self.online_cancel)
+            updates = updater.check_all(current, APP_VERSION)
+            self.events.put(("online_checked_all", updates))
+        except Exception as error:
+            self.events.put(("online_error", (True, error)))
+
+    def _continue_firmware_update(self, *, flasher_declined: bool = False) -> bool:
+        updates = self.pending_updates
+        self.pending_updates = None
+        if updates is None:
+            self._finish_online("Online update check finished")
+            return not self.closed
+        errors = list(dict.fromkeys(error for error in (updates.flasher_error, updates.firmware_error) if error))
+        if errors:
+            messagebox.showerror(APP_NAME, '\n'.join(errors), parent=self.root)
+        if updates.firmware is not None:
+            return self._handle_online_event('online_checked', updates.firmware)
+        if errors or flasher_declined:
+            self._finish_online("Flasher update not installed" if flasher_declined else "Online update check failed")
+            return not self.closed
+        return self._handle_online_event('online_checked', None)
+
+    def _begin_flasher_update(self, candidate: OnlineFlasher) -> bool:
+        if getattr(sys, 'frozen', False):
+            target = Path(sys.executable).resolve()
+        else:
+            downloads = Path.home() / 'Downloads'
+            selected = filedialog.asksaveasfilename(
+                parent=self.root, title="Save updated flasher",
+                initialdir=str(downloads if downloads.is_dir() else Path.home()),
+                initialfile=candidate.filename,
+                defaultextension='.exe' if candidate.platform.startswith('windows-') else '',
+            )
+            if not selected:
+                return self._continue_firmware_update(flasher_declined=True)
+            target = Path(selected).expanduser().resolve()
+            if target.suffix.lower() in ('.bin', '.py'):
+                messagebox.showerror(APP_NAME, 'Choose an application filename for the updated flasher.', parent=self.root)
+                return self._continue_firmware_update(flasher_declined=True)
+        self.progress.configure(style="Flash.Horizontal.TProgressbar")
+        self.highest_progress = 0.0
+        self._set_progress(0)
+        self.status_var.set(f"Downloading Flasher {candidate.version}…")
+        threading.Thread(target=self._flasher_download_worker, args=(candidate, target), daemon=True).start()
+        return True
+
+    def _flasher_download_worker(self, candidate: OnlineFlasher, target: Path) -> None:
+        stage = None
+        delivered = False
+        last_percent = -1
+
+        def progress(percent: float) -> None:
+            nonlocal last_percent
+            if int(percent) != last_percent:
+                last_percent = int(percent)
+                self.events.put(('online_progress', percent))
+        try:
+            stage = create_stage(target)
+            OnlineUpdater(APP_VERSION, self.online_cancel).download(
+                candidate, stage / 'download',
+                lambda path, version: verify_flasher(path, version, candidate.platform), progress)
+            self.events.put(('online_flasher_ready', (candidate, target, stage)))
+            delivered = True
+        except Exception as error:
+            self.events.put(('online_flasher_error', error))
+        finally:
+            if stage is not None and not delivered:
+                shutil.rmtree(stage, ignore_errors=True)
+
+    def _online_download_worker(self, candidate: OnlineFirmware, path: Path) -> None:
+        last_percent = -1
+
+        def progress(percent: float) -> None:
+            nonlocal last_percent
+            rounded = int(percent)
+            if rounded != last_percent:
+                last_percent = rounded
+                self.events.put(("online_progress", percent))
+
+        try:
+            OnlineUpdater(APP_VERSION, self.online_cancel).download(
+                candidate, path, validate_online_firmware, progress)
+            firmware = inspect_firmware(path)
+            self.events.put(("online_downloaded", (candidate, firmware)))
+        except Exception as error:
+            self.events.put(("online_error", (False, error)))
+
+    def _finish_online(self, status: str) -> None:
+        self.online_busy = False
+        if self.quit_after_online:
+            self._on_close()
+            return
+        self._set_main_controls_locked(False)
+        self.refresh_ports()
+        self.status_var.set(status)
+
+    def _handle_online_event(self, kind: str, payload: object) -> bool:
+        # All dialogs, widget changes, and file selection occur on the Tk thread.
+        if self.quit_after_online and kind != 'online_progress':
+            if kind == 'online_flasher_ready':
+                shutil.rmtree(payload[2], ignore_errors=True)
+            self.online_busy = False
+            self._on_close()
+            return False
+        if kind == 'online_progress':
+            if not self.quit_after_online:
+                self._set_progress(float(payload))
+        elif kind == 'online_checked_all':
+            self.pending_updates = payload
+            candidate = payload.flasher
+            if candidate is not None:
+                if messagebox.askyesno(
+                    APP_NAME,
+                    f"Newest MarauderEternal Flasher version {candidate.version} found, do you want to download and restart?",
+                    parent=self.root,
+                ):
+                    return self._begin_flasher_update(candidate)
+                return self._continue_firmware_update(flasher_declined=True)
+            return self._continue_firmware_update()
+        elif kind == 'online_flasher_ready':
+            candidate, target, stage = payload
+            try:
+                firmware = self.firmware.path if self.firmware and not self.firmware.included else None
+                prepare_handoff(stage, target, candidate.version, candidate.sha256, candidate.platform, firmware)
+            except Exception as error:
+                shutil.rmtree(stage, ignore_errors=True)
+                messagebox.showerror(APP_NAME, f'Flasher update failed: {error}', parent=self.root)
+                return self._continue_firmware_update(flasher_declined=True)
+            self.online_busy = False
+            self.root.destroy()
+            self.closed = True
+            return False
+        elif kind == 'online_flasher_error':
+            if not isinstance(payload, UpdateCancelled):
+                message = SERVER_ERROR if isinstance(payload, UpdateConnectionError) else f'Flasher update failed: {payload}'
+                messagebox.showerror(APP_NAME, message, parent=self.root)
+            return self._continue_firmware_update(flasher_declined=True)
+        elif kind == 'online_checked':
+            candidate = payload
+            if candidate is None:
+                self._append_log("Up To Date")
+                messagebox.showinfo(APP_NAME, "Up To Date", parent=self.root)
+                self._finish_online("Up To Date")
+                return not self.closed
+            if not messagebox.askyesno(
+                APP_NAME,
+                f"Newest MarauderEternal version {candidate.version} found, do you want to download?",
+                parent=self.root,
+            ):
+                self._finish_online("Firmware download declined")
+                return not self.closed
+            downloads = Path.home() / 'Downloads'
+            selected = filedialog.asksaveasfilename(
+                parent=self.root, title="Save firmware update",
+                initialdir=str(downloads if downloads.is_dir() else Path.home()),
+                initialfile=candidate.filename, defaultextension='.bin',
+                filetypes=(("Firmware BIN files", "*.bin"),),
+            )
+            if not selected:
+                self._finish_online("Firmware download cancelled")
+                return not self.closed
+            destination = Path(selected).expanduser().resolve()
+            if destination == resource_path().resolve():
+                messagebox.showerror(APP_NAME, "Choose a different filename to keep the current firmware available.", parent=self.root)
+                self._finish_online("Firmware download cancelled")
+                return not self.closed
+            self.progress.configure(style="Flash.Horizontal.TProgressbar")
+            self.highest_progress = 0.0
+            self._set_progress(0)
+            self.status_var.set(f"Downloading MarauderEternal {candidate.version}…")
+            threading.Thread(target=self._online_download_worker,
+                             args=(candidate, destination), daemon=True).start()
+        elif kind == 'online_downloaded':
+            candidate, firmware = payload
+            self._select_firmware(firmware, str(firmware.path))
+            self.progress.configure(style="Success.Horizontal.TProgressbar")
+            self._set_progress(100)
+            self._append_log(f"Downloaded and verified MarauderEternal {candidate.version}: {firmware.path}")
+            self._finish_online(f"MarauderEternal {candidate.version} downloaded — ready to flash")
+            messagebox.showinfo(APP_NAME, f"MarauderEternal {candidate.version} downloaded and verified.\n\nSelect Connect & Flash when you are ready to install it.", parent=self.root)
+        elif kind == 'online_error':
+            checking, error = payload
+            if isinstance(error, UpdateCancelled):
+                self._finish_online("Online update cancelled")
+                return not self.closed
+            message = SERVER_ERROR if checking or isinstance(error, UpdateConnectionError) else f"Firmware download failed: {error}"
+            self._append_log(message)
+            self._finish_online("Online update failed")
+            self.status_label.configure(foreground=self.ERROR)
+            messagebox.showerror(APP_NAME, message, parent=self.root)
+        return not self.closed
+
     def refresh_ports(self) -> None:
-        if (self.flashing or self.sd_busy or self._mirror_open() or
+        if (self.flashing or self.sd_busy or self.online_busy or self._mirror_open() or
                 (self.sd_window is not None and self.sd_window.winfo_exists())):
             return
         selected_device = self.selected_port()
+        self._refresh_firmware_availability()
         self.ports = discover_ports()
         self.port_by_label = {entry.label: entry for entry in self.ports}
         values = list(self.port_by_label)
@@ -1433,7 +1745,7 @@ class FlasherApp:
         else:
             self.port_var.set("")
 
-        self.flash_button.configure(state="normal" if self.ports else "disabled")
+        self.flash_button.configure(state="normal" if self.ports and self.firmware else "disabled")
         self.sd_files_button.configure(state="normal" if self.ports else "disabled")
         self.mirror_button.configure(state="normal" if self.ports else "disabled")
         if not self.ports:
@@ -1449,7 +1761,7 @@ class FlasherApp:
         return self.mirror_window is not None and bool(self.mirror_window.winfo_exists())
 
     def open_screen_mirror(self) -> None:
-        if self.flashing or self.sd_busy or self.sd_window is not None:
+        if self.flashing or self.sd_busy or self.online_busy or self.sd_window is not None:
             return
         if self._mirror_open():
             self.mirror_window.lift()
@@ -1636,7 +1948,7 @@ class FlasherApp:
         self._set_flashing_controls(False)
 
     def open_sd_files(self, refresh: bool = True) -> None:
-        if self.flashing or self.sd_busy or self._mirror_open():
+        if self.flashing or self.sd_busy or self.online_busy or self._mirror_open():
             return
         if not self.selected_port():
             messagebox.showerror(APP_NAME, "Select a serial device before browsing SD files.")
@@ -1876,9 +2188,10 @@ class FlasherApp:
         self.firmware_entry.configure(state="disabled" if main_locked else "readonly")
         self.refresh_button.configure(state=main_state)
         self.browse_button.configure(state=main_state)
-        self.included_button.configure(state=main_state)
+        self.included_button.configure(state=main_state if self.included_available else "disabled")
+        self.online_button.configure(state=main_state)
         self.flash_button.configure(
-            state=main_state if self.ports else "disabled"
+            state=main_state if self.ports and self.firmware else "disabled"
         )
         self.sd_files_button.configure(
             state=main_state if self.ports else "disabled"
@@ -2134,7 +2447,7 @@ class FlasherApp:
             self.events.put(("sd_error", friendly_sd_failure(error)))
 
     def _automatic_refresh(self) -> None:
-        if (not self.flashing and not self.sd_busy and
+        if (not self.flashing and not self.sd_busy and not self.online_busy and
                 (self.sd_window is None or not self.sd_window.winfo_exists())):
             self.refresh_ports()
         self.root.after(1800, self._automatic_refresh)
@@ -2157,18 +2470,26 @@ class FlasherApp:
 
     def _set_flashing_controls(self, active: bool) -> None:
         self.flashing = active
+        self._set_main_controls_locked(active)
+
+    def _set_main_controls_locked(self, active: bool) -> None:
         state = "disabled" if active else "normal"
         self.port_combo.configure(state="disabled" if active else "readonly")
         self.firmware_entry.configure(state="disabled" if active else "readonly")
         self.refresh_button.configure(state=state)
         self.browse_button.configure(state=state)
-        self.included_button.configure(state=state)
-        self.flash_button.configure(state=state if self.ports else "disabled")
+        self.included_button.configure(state=state if self.included_available else "disabled")
+        self.online_button.configure(state=state)
+        self.flash_button.configure(state=state if self.ports and self.firmware else "disabled")
         self.sd_files_button.configure(state=state if self.ports else "disabled")
         self.mirror_button.configure(state=state if self.ports else "disabled")
 
     def start_flash(self) -> None:
-        if self.flashing or self.sd_busy or self._mirror_open():
+        if self.flashing or self.sd_busy or self.online_busy or self._mirror_open():
+            return
+        self._refresh_firmware_availability()
+        if self.firmware is None:
+            messagebox.showerror(APP_NAME, "Download firmware or choose a BIN file before flashing.")
             return
         port = self.selected_port()
         if not port:
@@ -2274,7 +2595,10 @@ class FlasherApp:
         try:
             while True:
                 kind, payload = self.events.get_nowait()
-                if kind == "log":
+                if kind.startswith('online_'):
+                    if not self._handle_online_event(kind, payload):
+                        return
+                elif kind == "log":
                     self._append_log(str(payload))
                 elif kind == "progress":
                     self._set_progress(float(payload))
@@ -2356,6 +2680,8 @@ class FlasherApp:
                         self.mirror_reconnect.configure(state="normal")
         except queue.Empty:
             pass
+        if self.closed:
+            return
         if self._mirror_open():
             try:
                 self.mirror_rgb = self.mirror_frames.get_nowait()
@@ -2380,6 +2706,11 @@ class FlasherApp:
             messagebox.showerror(APP_NAME, message)
 
     def _on_close(self) -> None:
+        if self.online_busy:
+            self.quit_after_online = True
+            self.online_cancel.set()
+            self.status_var.set("Stopping online update…")
+            return
         if self.flashing or self.sd_busy:
             messagebox.showwarning(
                 APP_NAME,
@@ -2397,11 +2728,12 @@ class FlasherApp:
                 return
             self._destroy_sd_window()
         self.root.destroy()
+        self.closed = True
 
 
 def self_test() -> int:
     try:
-        firmware = inspect_firmware(resource_path(), included=True)
+        firmware = inspect_firmware(resource_path(), included=True) if resource_path().is_file() else None
         import esptool
         import serial
         esptool_output: list[str] = []
@@ -2413,9 +2745,12 @@ def self_test() -> int:
         print(f"SELF-TEST FAILED: {error}", file=sys.stderr)
         return 1
     print(f"{APP_NAME} {APP_VERSION}")
-    print(f"Firmware: {firmware.path}")
-    print(f"Firmware type: {firmware.image_type} at {firmware.offset_text}")
-    print(f"Firmware SHA-256: {firmware.sha256}")
+    if firmware is not None:
+        print(f"Firmware: {firmware.path}")
+        print(f"Firmware type: {firmware.image_type} at {firmware.offset_text}")
+        print(f"Firmware SHA-256: {firmware.sha256}")
+    else:
+        print("Firmware: not included; Download Firmware is available")
     print(f"esptool: {getattr(esptool, '__version__', 'available')}")
     print(f"pyserial: {getattr(serial, 'VERSION', 'available')}")
     print(f"Serial enumeration: available ({discovered_count} port(s) found)")
@@ -2425,8 +2760,13 @@ def self_test() -> int:
 
 def ui_smoke_test() -> int:
     root = tk.Tk()
-    app = FlasherApp(root)
+    app = FlasherApp(root, check_updates=False)
     root.update()
+    if not app.online_button.winfo_exists():
+        raise RuntimeError("The online firmware control did not render.")
+    for button in (app.browse_button, app.included_button, app.online_button):
+        if button.winfo_rootx() + button.winfo_width() > root.winfo_rootx() + root.winfo_width():
+            raise RuntimeError("A firmware selection control is clipped.")
     visible_lines = app.visible_activity_lines()
     if visible_lines < MIN_ACTIVITY_LINES:
         root.destroy()
@@ -2512,7 +2852,7 @@ def ui_smoke_test() -> int:
     app._close_mirror(); root.update()
     if app.mirror_input_active or app.mirror_keyboard.sample(5.001):
         raise RuntimeError("Mirror keyboard state survived disconnect.")
-    if str(app.flash_button.cget("state")) != "normal":
+    if str(app.flash_button.cget("state")) != ("normal" if app.firmware else "disabled"):
         raise RuntimeError("Closing Screen Mirror did not restore USB controls.")
     root.destroy()
     print(f"UI SMOKE TEST PASSED ({visible_lines} activity lines visible)")
@@ -2521,15 +2861,36 @@ def ui_smoke_test() -> int:
 
 def main(arguments: Iterable[str] | None = None) -> int:
     args = list(arguments if arguments is not None else sys.argv[1:])
+    if len(args) == 2 and args[0] == '--apply-flasher-update':
+        return helper_main(Path(args[1]))
+    if len(args) == 2 and args[0] == '--update-health':
+        result = self_test()
+        if result == 0:
+            Path(args[1]).write_text(json.dumps({
+                'product': APP_NAME, 'version': APP_VERSION,
+                'platform': current_platform(), 'update_protocol': 1, 'status': 'ok',
+            }), encoding='utf-8')
+        return result
     if args == ["--self-test"]:
         return self_test()
     if args == ["--ui-smoke-test"]:
         return ui_smoke_test()
-    if args:
+    selected_firmware = None
+    if len(args) == 2 and args[0] == '--firmware':
+        selected_firmware = Path(args[1])
+    elif args:
         print(f"Unknown arguments: {' '.join(args)}", file=sys.stderr)
         return 2
     root = tk.Tk()
-    FlasherApp(root)
+    app = FlasherApp(root)
+    if selected_firmware is not None:
+        try:
+            firmware = inspect_firmware(selected_firmware)
+            app._select_firmware(firmware, str(firmware.path))
+        except (OSError, ValueError) as error:
+            app._append_log(f'Previous firmware selection is unavailable: {error}')
+    if getattr(sys, 'frozen', False):
+        threading.Thread(target=cleanup_completed, args=(Path(sys.executable),), daemon=True).start()
     root.mainloop()
     return 0
 

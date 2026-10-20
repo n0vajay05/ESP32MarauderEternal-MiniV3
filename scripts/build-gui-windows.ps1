@@ -15,18 +15,19 @@ py -3 -m venv $VenvDir
 Push-Location $ProjectDir
 try {
     & $Python -m unittest discover -v
+    if ($LASTEXITCODE -ne 0) { throw "Desktop tests failed." }
     & $PyInstaller `
         --clean `
         --noconfirm `
         --distpath $DistDir `
         --workpath $WorkDir `
         (Join-Path $ProjectDir "flasher\MarauderEternalFlasher.spec")
+    if ($LASTEXITCODE -ne 0) { throw "Flasher build failed." }
     & (Join-Path $DistDir "MarauderEternalFlasher.exe") --self-test
-    $FlasherHash = (Get-FileHash `
-        (Join-Path $DistDir "MarauderEternalFlasher.exe") `
-        -Algorithm SHA256).Hash.ToLowerInvariant()
-    "$FlasherHash  MarauderEternalFlasher.exe" |
-        Set-Content -Encoding ascii (Join-Path $DistDir "SHA256SUMS.txt")
+    if ($LASTEXITCODE -ne 0) { throw "Bundled self-test failed." }
+    & $Python (Join-Path $ProjectDir "scripts\package_flasher.py") `
+        (Join-Path $DistDir "MarauderEternalFlasher.exe") --platform windows-x86_64
+    if ($LASTEXITCODE -ne 0) { throw "Flasher release packaging failed." }
 } finally {
     Pop-Location
 }

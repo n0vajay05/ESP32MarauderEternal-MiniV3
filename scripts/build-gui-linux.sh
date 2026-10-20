@@ -21,5 +21,5 @@ cd "${PROJECT_DIR}"
   "${PROJECT_DIR}/flasher/MarauderEternalFlasher.spec"
 
 "${DIST_DIR}/MarauderEternalFlasher" --self-test
-(cd "${DIST_DIR}" && sha256sum MarauderEternalFlasher > SHA256SUMS)
+"${VENV_DIR}/bin/python" "${PROJECT_DIR}/scripts/package_flasher.py" "${DIST_DIR}/MarauderEternalFlasher" --platform linux-x86_64
 echo "Linux application: ${DIST_DIR}/MarauderEternalFlasher"
