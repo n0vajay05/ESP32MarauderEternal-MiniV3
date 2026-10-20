@@ -13,14 +13,14 @@
   ],
   "fqbn": "esp32:esp32:esp32c5:FlashSize=8M,PartitionScheme=custom,PSRAM=enabled",
   "esp32_arduino_core": "3.3.4",
-  "source_base_commit": "3715a20ce8391a7ebad5db072b05aba262b0ec59",
+  "source_base_commit": "876536edd6af44d0e8f8b8156aaa99f18d1f3b03",
   "source_worktree_modified": true,
   "build_date": "2026-10-19",
   "full_device_image": {
     "file": "Marauder_Eternal_1.16.2_MiniV3_ESP32-C5.bin",
     "offset": "0x0",
     "bytes": 8388608,
-    "sha256": "80b9f171f93c4bf871d0bf4975b94b5e05c6e85aad3d363b6532fc4d9265c9da",
+    "sha256": "680c98df630bbee86547616a6fbd9d2a49a38f98a2666c7757f284a21229fe48",
     "contains": [
       "bootloader@0x2000",
       "partitions@0x8000",
@@ -50,8 +50,8 @@
     {
       "file": "Marauder_Eternal_1.16.2_MiniV3_ESP32-C5.app.bin",
       "offset": "0x10000",
-      "bytes": 2639280,
-      "sha256": "3cfa91e46e94a053db1bf6088416bf37a27076ba84c272c18b2f9ea1720985f0"
+      "bytes": 2768512,
+      "sha256": "a203634bdc792c554a12ab032e6c4abd16b164092eccf1a80b140011e81c1924"
     }
   ]
 }

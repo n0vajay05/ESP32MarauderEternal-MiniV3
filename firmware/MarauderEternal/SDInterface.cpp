@@ -161,6 +161,10 @@ namespace {
 
 bool SDInterface::initSD() {
   #ifdef HAS_SD
+    this->supported = false;
+    this->cardType = CARD_NONE;
+    this->cardSizeMB = 0;
+    this->card_sz = "";
     #ifdef KIT
       pinMode(SD_DET, INPUT);
       if (digitalRead(SD_DET) != LOW) {
@@ -170,6 +174,7 @@ bool SDInterface::initSD() {
     #endif
 
     pinMode(SD_CS, OUTPUT);
+    digitalWrite(SD_CS, HIGH);
 
     delay(10);
     #if (defined(MARAUDER_M5STICKC)) || (defined(HAS_CYD_TOUCH)) || (defined(MARAUDER_CARDPUTER)) || (defined(MARAUDER_CARDPUTER_ADV))
@@ -197,6 +202,16 @@ bool SDInterface::initSD() {
       Serial.println(F("Using external SPI configuration..."));
       this->spiExt->begin(SPI_SCK, SPI_MISO, SPI_MOSI, SD_CS);
       if (!SD.begin(SD_CS, *(this->spiExt))) {
+    #elif defined(MARAUDER_MINI_V3)
+      bool mounted = SD.begin(_cs, *_spi, 4000000);
+      if (!mounted) {
+        Serial.println(F("SD mount failed at 4 MHz; retrying at 1 MHz"));
+        SD.end();
+        digitalWrite(_cs, HIGH);
+        delay(250);
+        mounted = SD.begin(_cs, *_spi, 1000000);
+      }
+      if (!mounted) {
     #elif defined(HAS_C5_SD)
       if (!SD.begin(SD_CS, *_spi)) {
     #else
@@ -212,6 +227,9 @@ bool SDInterface::initSD() {
 
       this->cardSizeMB = SD.cardSize() / (1024 * 1024);
       this->card_sz = String(this->cardSizeMB);
+
+      Serial.printf("SD Card mounted: %llu MB\n",
+                    static_cast<unsigned long long>(this->cardSizeMB));
 
       this->ensureStorageLayout();
 

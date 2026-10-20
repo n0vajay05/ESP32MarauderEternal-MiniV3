@@ -81,3 +81,9 @@ g++ -std=c++17 -Wall -Wextra -Werror \
   "${PROJECT_DIR}/firmware/MarauderEternal/MirrorInput.cpp" \
   -o "${TEST_DIR}/test_mirror_input"
 "${TEST_DIR}/test_mirror_input"
+g++ -std=c++17 -Wall -Wextra -Werror \
+  -I"${PROJECT_DIR}/firmware/MarauderEternal" \
+  -I"${PROJECT_DIR}/libraries/ArduinoJson/src" \
+  "${PROJECT_DIR}/tests/native/test_ota.cpp" \
+  -o "${TEST_DIR}/test_ota"
+"${TEST_DIR}/test_ota"

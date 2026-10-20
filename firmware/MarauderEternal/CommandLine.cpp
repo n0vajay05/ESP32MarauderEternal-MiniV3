@@ -1,4 +1,5 @@
 #include "CommandLine.h"
+#include "WiFiOTA.h"
 #include "FirmwareChecks.h"
 #include "DroneRemoteID.h"
 #include "BLEDeviceDetectors.h"
@@ -536,6 +537,21 @@ void CommandLine::startScanFromCLI(int scan_mode, uint16_t color, const char* sc
 void CommandLine::runCommand(String input) {
   if (input == "") return;
   if (marauder::mirror::command(input.c_str(), this->sd_session_active)) return;
+  if (marauder::ota::active() && !input.startsWith("protocolinfo") &&
+      input != "update --status" && input != "update --exit") {
+    Serial.println(F("WiFi update mode is active; leave Update Firmware before other commands"));
+    return;
+  }
+  if (input == "update --status") { marauder::ota::printStatus(); return; }
+  if (input == "update --exit") {
+    if (this->sd_session_active) { Serial.println(F("Close SD Files first")); return; }
+    menu_function_obj.exitFirmwareUpdate(); return;
+  }
+  if (input == "update --wifi") {
+    if (this->sd_session_active) { Serial.println(F("Close SD Files first")); return; }
+    menu_function_obj.showWifiUpdate();
+    return;
+  }
 
   const bool storage_protocol_command =
       input.startsWith("protocolinfo ") || input.startsWith("sdlist ") ||
@@ -581,6 +597,16 @@ void CommandLine::runCommand(String input) {
     else if (cmd_args.size() >= 2 && cmd_args.get(1) == "ibeacon") BLEDeviceDetectors::runIBeaconChecks();
     else if (cmd_args.size() >= 2 && cmd_args.get(1) == "findmy") runTrackerChecks();
     else if (cmd_args.size() >= 2 && cmd_args.get(1) == "mirror") runMirrorChecks();
+    else if (cmd_args.size() >= 2 && cmd_args.get(1) == "ota") {
+      if (cmd_args.size() >= 3 && cmd_args.get(2) == "menu") marauder::ota::runMenuCheck();
+      else if (cmd_args.size() >= 3 && cmd_args.get(2) == "download") marauder::ota::runDownloadCheck();
+      else if (cmd_args.size() >= 3 && (cmd_args.get(2) == "image" || cmd_args.get(2) == "boot"))
+        marauder::ota::runImageChecks(cmd_args.get(2) == "boot");
+      else if (cmd_args.size() >= 3 && (cmd_args.get(2) == "profile-seed" || cmd_args.get(2) == "profile-check"))
+        marauder::ota::runProfileChecks(cmd_args.get(2) == "profile-seed");
+      else if (cmd_args.size() >= 3 && cmd_args.get(2) == "keypad") marauder::ota::runKeypadCheck();
+      else marauder::ota::runChecks();
+    }
     else if (cmd_args.size() >= 2 && cmd_args.get(1) == "gpstracker") runGpsTrackerChecks();
     else if (cmd_args.size() >= 2 && cmd_args.get(1) == "fox") {
       runFoxChecks();
@@ -1094,7 +1120,7 @@ void CommandLine::runCommand(String input) {
           "\"status\":\"success\",\"code\":\"OK\",\"firmware\":\"%s\","
           "\"capabilities\":[\"spiffs-backup\",\"spiffs-backup-status\","
           "\"spiffs-restore\",\"sd-list\",\"sd-download\",\"sd-upload\","
-          "\"sd-session\",\"screen-mirror-v1\",\"screen-mirror-input-v1\"],"
+          "\"sd-session\",\"screen-mirror-v1\",\"screen-mirror-input-v1\",\"wifi-ota-v1\"],"
           "\"backupPath\":\"/spiffs\"}\n",
           transaction_id.c_str(), version_number.c_str()
         );

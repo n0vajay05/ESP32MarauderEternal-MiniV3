@@ -358,6 +358,8 @@ class MenuFunctions
     #endif
 
   public:
+    void showWifiUpdate();
+    void exitFirmwareUpdate();
     void showSavedWifiMenu(bool replace = false);
     void showGeofenceMenu();
     void showIBeaconMenu();

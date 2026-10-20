@@ -123,6 +123,65 @@ Open **Device > Brightness** to adjust the Mini V3 backlight. Use **Up** or
 **Right** to make the display brighter, **Down** or **Left** to dim it, and
 **Center** to save and return. The selected level is retained across restarts.
 
+## WiFi firmware updates
+
+Open **Device > Update Firmware > Update Over WiFi**. An SD card is not
+required. Choose **Scan SSIDs** to select a nearby network, or **Add SSID
+Manually** to enter a network name, including a hidden SSID. Use the joystick
+to move around the keyboard and Center to select a character. **Mode** cycles
+through lowercase, uppercase, numbers, and symbols; **Del** removes a character,
+**Back** cancels, and **Enter** at the bottom right finishes the entry.
+Passwords are masked. Open networks accept an empty password; networks that
+require a captive portal or enterprise login are not supported.
+
+After connecting, the Mini checks the
+[Eternal Mini V3 update repository](https://github.com/n0vajay05/ESP32MarauderEternal-MiniV3/releases)
+with a **15-second** server timeout. An unreachable or unusable update server
+shows **Failed to connect to update server**. A successful connection returns
+to the update menu with **Connected: SSID** in its top banner. When disconnected,
+the banner reads **Please Connect To Update**. **Network Info** displays
+the received IP address, subnet mask, gateway, primary DNS, and secondary DNS.
+Select a field to edit its address with the joystick number pad, then choose
+**Apply Changes** to reconnect with the manual settings. **Use DHCP** restores
+automatic configuration. A secondary DNS of `0.0.0.0` leaves it unused.
+
+Select **Check For Updates** from the update menu. The Mini checks the
+latest published stable release, compares numeric version numbers, and offers
+**Install** when the release is newer. Keep power connected while installing.
+Firmware downloads directly into the inactive flash slot; the Mini checks its
+size, SHA-256 checksum, embedded hardware identity, version, and partition layout
+before selecting it for boot. It reboots into the update and accepts it after
+startup checks pass. A failed or interrupted download keeps the current boot
+image; an update that fails startup verification can roll back to the previous
+slot. Releases must include the existing `manifest.json` and matching Mini V3
+ESP32-C5 `.app.bin` assets. OTA updates the application, preserving settings and
+SD contents; partition or bootloader changes require USB flashing.
+
+Update mode stops other radio features and limits application requests to this
+repository's GitHub release API and release assets, including GitHub's required
+asset redirects. Normal WiFi association, DHCP, and DNS traffic is also needed.
+It starts no portal, web server, or general internet client. The last successful
+update network and any manual address settings are saved separately from the
+five general WiFi profiles and reconnect on the next visit. On first use, an
+existing saved WiFi profile can be reused. **Forget Network** disconnects and
+clears the saved update network and its manual settings. An explicitly forgotten
+network is not automatically imported again from the general WiFi profiles.
+Backing out of **Update Firmware**
+disconnects WiFi, turns the radio off, and disables automatic reconnection.
+Backing out of its WiFi submenu keeps the session available until you leave
+Update Firmware. **Update From SD** remains available when an SD card is present.
+
+USB mirroring and its arrow/C controls work throughout network setup. Serial
+`update --status` reports update state without credentials; `update --exit`
+closes the update session. `selftest ota` runs isolated policy, keyboard, and
+HTTP framing checks without connecting to a network. TLS allocations use PSRAM
+so the HTTPS handshake leaves internal RAM available for WiFi and the UI;
+normal allocation is restored after each request. Connection diagnostics include
+the failed stage, native TLS error, and HTTP status in `update --status`.
+`selftest ota download` uses the saved update network to download and verify
+the published firmware's checksum and embedded identity without writing flash,
+then disconnects WiFi.
+
 ## SSID groups
 
 Use **WiFi > WiFi Sniffers > Scan SSIDs** to discover AP radios and
@@ -346,6 +405,11 @@ mirroring. Run it with radio modes stopped. `mirror status` reports the capture
 buffer location, free heap, and capture/transfer timing counters.
 
 ## SD card layout
+
+The Mini V3 initializes the SD card before the display on their shared SPI bus.
+If the normal 4 MHz mount fails, startup retries once at 1 MHz. The serial boot
+log reports a successful mount or a failure; a failed mount leaves SD features
+unavailable until the next restart.
 
 The firmware creates a predictable directory layout whenever an SD card is
 mounted. New output is stored by purpose instead of accumulating in the card

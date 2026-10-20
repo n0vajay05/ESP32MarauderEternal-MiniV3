@@ -19,6 +19,7 @@
 #include "WirelessDeviceScout.h"
 #include "WirelessActivityTools.h"
 #include "DeviceClock.h"
+#include "WiFiOTA.h"
 
 #ifdef HAS_SCREEN
 
@@ -4964,21 +4965,25 @@ void MenuFunctions::RunSetup()
     this->changeMenu(deviceMenu.parentMenu, true);
   });
 
+  this->addNodes(&deviceMenu, "Update Firmware", TFTORANGE, SD_UPDATE, [this]() {
+    marauder::ota::beginSession();
+    this->changeMenu(&updateMenu, true);
+  });
+  updateMenu.name = "Update Firmware";
+  updateMenu.parentMenu = &deviceMenu;
+  this->addNodes(&updateMenu, "Back", TFTLIGHTGREY, 0, [this]() {
+    this->changeMenu(&deviceMenu, true);
+  });
+  this->addNodes(&updateMenu, "Update Over WiFi", TFTCYAN, WEB_UPDATE, [this]() {
+    marauder::ota::run();
+    this->changeMenu(marauder::ota::active() ? &updateMenu : &deviceMenu, true);
+  });
   #ifdef HAS_SD
     if (sd_obj.supported) {
-
-      sdDeleteMenu.parentMenu = &deviceMenu;
-
-      this->addNodes(&deviceMenu, "Update Firmware", TFTORANGE, SD_UPDATE, [this]() {
-        display_obj.clearScreen();
-        display_obj.tft.setTextWrap(false);
-        display_obj.tft.setCursor(0, SCREEN_HEIGHT / 3);
-        display_obj.tft.setTextColor(TFT_CYAN, TFT_BLACK);
-        display_obj.tft.println("Loading...");
-
-        // Clear menu and lists
+      sdDeleteMenu.parentMenu = &updateMenu;
+      this->addNodes(&updateMenu, "Update From SD", TFTORANGE, SD_UPDATE, [this]() {
+        marauder::ota::endSession();
         this->buildSDFileMenu(true);
-
         this->changeMenu(&sdDeleteMenu, true);
       });
     }
@@ -5188,7 +5193,7 @@ void MenuFunctions::RunSetup()
   updateMenu.parentMenu = &deviceMenu;
 
   // Failed update menu
-  failedUpdateMenu.parentMenu = &deviceMenu;
+  failedUpdateMenu.parentMenu = &updateMenu;
   this->addNodes(&failedUpdateMenu, text09, TFTLIGHTGREY, 0, [this]() {
     wifi_scan_obj.currentScanMode = WIFI_SCAN_OFF;
     this->changeMenu(failedUpdateMenu.parentMenu, true);
@@ -5631,6 +5636,7 @@ void MenuFunctions::setupSDFileList(bool update) {
 }
 
 void MenuFunctions::buildSDFileMenu(bool update) {
+  sdDeleteMenu.parentMenu = update ? &updateMenu : &deviceMenu;
   this->setupSDFileList(update);
 
   sdDeleteMenu.list->clear();
@@ -5911,6 +5917,8 @@ uint16_t MenuFunctions::getColor(uint16_t color) {
 
 // Function to change menu
 void MenuFunctions::changeMenu(Menu* menu, bool simple_change, uint16_t initial_selection) {
+  if (marauder::ota::active() && menu != &updateMenu && menu != &sdDeleteMenu && menu != &failedUpdateMenu)
+    marauder::ota::endSession();
   if (!simple_change) {
     //display_obj.initScrollValues();
     //display_obj.setupScrollArea(TOP_FIXED_AREA, BOT_FIXED_AREA);
@@ -5944,6 +5952,15 @@ void MenuFunctions::changeMenu(Menu* menu, bool simple_change, uint16_t initial_
   //#ifdef MARAUDER_V8
   //  digitalWrite(TFT_BL, HIGH);
   //#endif
+}
+
+void MenuFunctions::showWifiUpdate() {
+  marauder::ota::beginSession(); changeMenu(&updateMenu, true);
+  marauder::ota::run();
+  changeMenu(marauder::ota::active() ? &updateMenu : &deviceMenu, true);
+}
+void MenuFunctions::exitFirmwareUpdate() {
+  marauder::ota::endSession(); changeMenu(&deviceMenu, true);
 }
 
 void MenuFunctions::buildButtons(Menu *menu, int starting_index, const char* button_name) {

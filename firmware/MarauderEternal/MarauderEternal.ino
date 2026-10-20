@@ -38,6 +38,7 @@ https://www.online-utility.org/image/convert/to/XBM
 
 #include "settings.h"
 #include "DeviceClock.h"
+#include "WiFiOTA.h"
 #include "CommandLine.h"
 #include "lang_var.h"
 
@@ -310,6 +311,13 @@ void setup()
     delay(10);
 
   #ifdef HAS_C5_SD
+    #ifdef MARAUDER_MINI_V3
+      // Keep both devices deselected before starting their shared SPI bus.
+      pinMode(TFT_CS, OUTPUT);
+      digitalWrite(TFT_CS, HIGH);
+      pinMode(SD_CS, OUTPUT);
+      digitalWrite(SD_CS, HIGH);
+    #endif
     SPI.begin(SD_SCK, SD_MISO, SD_MOSI);
     delay(100);
   #endif
@@ -357,9 +365,9 @@ void setup()
     }
   #endif
 
-  #ifdef HAS_SIMPLEX_DISPLAY
+  #if defined(HAS_SIMPLEX_DISPLAY) || defined(MARAUDER_MINI_V3)
     #if defined(HAS_SD)
-      // Do some SD stuff
+      // A shared-bus SD card must enter SPI mode before any TFT traffic.
       if(!sd_obj.initSD())
         Serial.println(F("SD Card NOT Supported"));
 
@@ -398,7 +406,7 @@ void setup()
   if (!settings_obj.begin())
     Serial.println(F("Settings initialization failed; using in-memory defaults"));
 
-  #ifndef HAS_SIMPLEX_DISPLAY
+  #if !defined(HAS_SIMPLEX_DISPLAY) && !defined(MARAUDER_MINI_V3)
     #if defined(HAS_SD)
       // Do some SD stuff
       if(!sd_obj.initSD())
@@ -463,6 +471,7 @@ void setup()
   wifi_scan_obj.StartScan(WIFI_SCAN_OFF);
   
   cli_obj.RunSetup();
+  marauder::ota::confirmBoot();
 }
 
 
@@ -500,6 +509,15 @@ void loop()
     #ifdef HAS_GPS
       gps_obj.main();
     #endif
+    delay(2);
+    return;
+  }
+
+  if (marauder::ota::active()) {
+    #ifdef HAS_GPS
+      gps_obj.main();
+    #endif
+    menu_function_obj.main(currentTime);
     delay(2);
     return;
   }
